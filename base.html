@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}LostLink{% endblock %} · LostLink</title>
+    <meta name="description" content="LostLink connects college lost and found reports with transparent matching.">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+  </head>
+  <body>
+    <div class="site-shell">
+      <header class="topbar">
+        <a class="brand" href="{{ url_for('main.home') }}" aria-label="LostLink home">
+          <span class="brand-mark">LL</span>
+          <span><strong>LostLink</strong><small>Campus lost & found</small></span>
+        </a>
+        <button class="menu-toggle" type="button" aria-label="Toggle navigation" data-menu-toggle>Menu</button>
+        <nav class="nav-links" data-nav>
+          <a href="{{ url_for('main.home') }}">Home</a>
+          <a href="{{ url_for('main.lost_items') }}">Lost items</a>
+          <a href="{{ url_for('main.found_items') }}">Found items</a>
+          <a href="{{ url_for('main.about') }}">About</a>
+          {% if g.user %}
+            <span class="nav-divider"></span>
+            <a href="{{ url_for('main.dashboard') }}">Dashboard</a>
+            <a href="{{ url_for('main.matches') }}">Matches</a>
+            <form class="inline-form" method="post" action="{{ url_for('main.logout') }}">
+              <button class="text-button" type="submit">Sign out</button>
+            </form>
+          {% else %}
+            <a class="button button-small button-ghost" href="{{ url_for('main.login') }}">Sign in</a>
+            <a class="button button-small" href="{{ url_for('main.register') }}">Create account</a>
+          {% endif %}
+        </nav>
+      </header>
+
+      <main>
+        {% with messages = get_flashed_messages(with_categories=true) %}
+          {% if messages %}
+            <div class="flash-stack container">
+              {% for category, message in messages %}
+                <div class="flash flash-{{ category }}" role="status">{{ message }}<button type="button" class="flash-close" data-dismiss>×</button></div>
+              {% endfor %}
+            </div>
+          {% endif %}
+        {% endwith %}
+        {% block content %}{% endblock %}
+      </main>
+
+      <footer class="footer">
+        <div class="container footer-inner">
+          <div>
+            <a class="brand footer-brand" href="{{ url_for('main.home') }}"><span class="brand-mark">LL</span><strong>LostLink</strong></a>
+            <p>A practical way for campus communities to return what matters.</p>
+          </div>
+          <div class="footer-links">
+            <a href="{{ url_for('main.about') }}">How it works</a>
+            <a href="{{ url_for('main.lost_items') }}">Browse lost</a>
+            <a href="{{ url_for('main.found_items') }}">Browse found</a>
+          </div>
+          <p class="footer-note">Built as a student project · No fake data, just real reports.</p>
+        </div>
+      </footer>
+    </div>
+    <script src="{{ url_for('static', filename='js/script.js') }}"></script>
+  </body>
+</html>

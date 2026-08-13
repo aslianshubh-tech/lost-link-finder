@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Report {{ kind }} item{% endblock %}
+{% block content %}
+<section class="page-header compact-header">
+  <div class="container">
+    <a class="back-link" href="{{ url_for('main.dashboard') }}">← Back to dashboard</a>
+    <p class="eyebrow">NEW {{ kind.upper() }} REPORT</p>
+    <h1>Tell us what happened.</h1>
+    <p>The more useful detail you add, the easier it is to compare this report with a possible match.</p>
+  </div>
+</section>
+<section class="container form-page">
+  <form class="report-form" method="post" enctype="multipart/form-data">
+    <div class="form-section"><p class="eyebrow">ITEM DETAILS</p><div class="form-grid">
+      <label>Item name<input name="item_name" required placeholder="e.g. Black scientific calculator" value="{{ request.form.get('item_name', '') }}"></label>
+      <label>Category<select name="category" required><option value="">Choose a category</option>{% for category in categories %}<option {{ "selected" if request.form.get("category") == category }}>{{ category }}</option>{% endfor %}</select></label>
+      <label>Color<input name="color" required placeholder="e.g. Black" value="{{ request.form.get('color', '') }}"></label>
+      <label>{{ "Last seen" if kind == "lost" else "Found" }} location<input name="location" required placeholder="e.g. Central library, 2nd floor" value="{{ request.form.get('location', '') }}"></label>
+    </div></div>
+    <div class="form-section"><p class="eyebrow">WHEN & WHAT IT LOOKS LIKE</p><div class="form-grid">
+      <label>Date<input name="item_date" type="date" required value="{{ request.form.get('item_date', '') }}"></label>
+      <label>Approximate time<input name="approx_time" type="time" required value="{{ request.form.get('approx_time', '') }}"></label>
+      <label class="full-width">Description<textarea name="description" rows="4" required placeholder="Describe the item and any marks, stickers, or identifying details.">{{ request.form.get('description', '') }}</textarea></label>
+      <label class="full-width">Additional information <span class="optional">optional</span><textarea name="additional_info" rows="3" placeholder="Anything else that could help?">{{ request.form.get('additional_info', '') }}</textarea></label>
+    </div></div>
+    <div class="form-section"><p class="eyebrow">OPTIONAL PHOTO</p><label class="upload-box"><span class="upload-icon">↑</span><span><strong>Choose an image</strong><small>PNG, JPG, GIF or WEBP · up to 4 MB</small></span><input name="image" type="file" accept=".png,.jpg,.jpeg,.gif,.webp" data-file-input></label><p class="file-name" data-file-name>No image selected</p></div>
+    <div class="form-actions"><a class="button button-ghost" href="{{ url_for('main.dashboard') }}">Cancel</a><button class="button" type="submit">Submit {{ kind }} report <span>→</span></button></div>
+  </form>
+</section>
+{% endblock %}

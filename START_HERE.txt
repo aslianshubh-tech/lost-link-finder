@@ -1,0 +1,63 @@
+LOSTLINK — START HERE
+=====================
+
+This folder is the complete LostLink Python + Flask + SQLite project.
+It does not require Node.js, npm, React, Vite, Firebase, Supabase, or PostgreSQL.
+
+WINDOWS / VS CODE
+-----------------
+1. Install Python 3.11 or newer from https://www.python.org/downloads/
+2. Open this LostLink folder in VS Code.
+3. Open Terminal > New Terminal.
+4. Run these commands:
+
+   python -m pip install -r requirements.txt
+   python app.py
+
+5. Open this address in your browser:
+
+   http://127.0.0.1:5000
+
+If `python` does not work on Windows, use:
+
+   py -m pip install -r requirements.txt
+   py app.py
+
+MACOS / LINUX
+-------------
+1. Open this LostLink folder in VS Code.
+2. Open the terminal.
+3. Run:
+
+   python3 -m pip install -r requirements.txt
+   python3 app.py
+
+4. Open:
+
+   http://127.0.0.1:5000
+
+DATABASE
+--------
+The SQLite database is created automatically at:
+
+   instance/lostlink.sqlite3
+
+It starts empty. No sample users or fake reports are included.
+
+If you want to reset the app, stop it and delete:
+
+   instance/lostlink.sqlite3
+
+The next start creates a new empty database.
+
+PROJECT FILES
+-------------
+app.py                         Main Flask application
+requirements.txt               Flask dependency
+templates/                     HTML pages
+static/css/style.css           Website design
+static/js/script.js            Browser interactions
+instance/                      SQLite database location
+uploads/                       Uploaded image location
+docs/ALL_CODE_LINE_NUMBERED.txt  Numbered code guide
+README.md                      Full project explanation

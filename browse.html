@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}Browse {{ kind }} items{% endblock %}
+{% block content %}
+<section class="page-header compact-header">
+  <div class="container">
+    <p class="eyebrow">CAMPUS BOARD</p>
+    <h1>{{ "Lost" if kind == "lost" else "Found" }} items</h1>
+    <p>{{ "See what students are looking for." if kind == "lost" else "See what students have found on campus." }}</p>
+  </div>
+</section>
+<section class="container page-content">
+  <form class="filter-bar" method="get">
+    <label class="filter-search"><span>⌕</span><input name="q" value="{{ request.args.get('q', '') }}" placeholder="Search item, color, place or date"></label>
+    <select name="category"><option value="">All categories</option>{% for category in categories %}<option {{ "selected" if request.args.get("category") == category }}>{{ category }}</option>{% endfor %}</select>
+    <input name="color" value="{{ request.args.get('color', '') }}" placeholder="Color">
+    <input name="location" value="{{ request.args.get('location', '') }}" placeholder="Location">
+    <input name="item_date" type="date" value="{{ request.args.get('item_date', '') }}">
+    <button class="button button-small" type="submit">Filter</button>
+    {% if request.args %}<a class="clear-link" href="{{ url_for('main.lost_items' if kind == 'lost' else 'main.found_items') }}">Clear</a>{% endif %}
+  </form>
+  {% if items %}
+    <div class="browse-grid">{% for item in items %}<a class="item-card" href="{{ url_for('main.item_detail', kind=kind, item_id=item['id']) }}">{% if item['image_filename'] %}<img src="{{ url_for('main.uploaded_file', filename=item['image_filename']) }}" alt="{{ item['item_name'] }}">{% else %}<div class="item-placeholder {{ kind }}"><span>{{ "L" if kind == "lost" else "F" }}</span></div>{% endif %}<div class="item-card-body"><div class="item-card-top"><span class="category-label">{{ item['category'] }}</span><span class="status status-{{ item['status'] }}">{{ item['status'].replace("_", " ") }}</span></div><h3>{{ item['item_name'] }}</h3><p>{{ item['color'] }} · {{ item['location'] }}</p><small>Reported by {{ item['reporter_name'] }} · {{ item['item_date'] }}</small></div></a>{% endfor %}</div>
+  {% else %}
+    <div class="empty-state large"><span class="empty-icon">{{ "L" if kind == "lost" else "F" }}</span><h2>No {{ kind }} items found</h2><p>{% if request.args %}Try removing a filter or searching for something else.{% else %}No {{ kind }} items have been reported yet.{% endif %}</p>{% if g.user %}<a class="button" href="{{ url_for('main.report', kind=kind) }}">Report a {{ kind }} item</a>{% else %}<a class="button" href="{{ url_for('main.register') }}">Create an account to report</a>{% endif %}</div>
+  {% endif %}
+</section>
+{% endblock %}

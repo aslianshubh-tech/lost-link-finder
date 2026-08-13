@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}{{ "Create account" if mode == "register" else "Sign in" }}{% endblock %}
+{% block content %}
+<section class="auth-page">
+  <div class="auth-card">
+    <div class="auth-intro">
+      <span class="mini-mark">LL</span>
+      <p class="eyebrow">{{ "JOIN LOSTLINK" if mode == "register" else "WELCOME BACK" }}</p>
+      <h1>{{ "Make it easier to bring things home." if mode == "register" else "Good to see you again." }}</h1>
+      <p>{{ "Create an account to report a lost or found item and keep track of your reports." if mode == "register" else "Sign in to see your dashboard, reports, and possible matches." }}</p>
+    </div>
+    <form class="form-stack" method="post">
+      {% if mode == "register" %}
+        <label>Full name<input name="full_name" type="text" placeholder="e.g. Ananya Rao" required value="{{ request.form.get('full_name', '') }}"></label>
+      {% endif %}
+      <label>College email<input name="email" type="email" placeholder="you@college.edu" required value="{{ request.form.get('email', '') }}"></label>
+      {% if mode == "register" %}
+        <label>Phone number <span class="optional">optional</span><input name="phone" type="tel" placeholder="+91 98765 43210" value="{{ request.form.get('phone', '') }}"></label>
+      {% endif %}
+      <label>Password{% if mode == "register" %} <span class="optional">8 characters minimum</span>{% endif %}<input name="password" type="password" placeholder="Enter your password" required></label>
+      <button class="button button-full" type="submit">{{ "Create account" if mode == "register" else "Sign in" }} <span>→</span></button>
+    </form>
+    <p class="auth-switch">{{ "Already have an account?" if mode == "register" else "New to LostLink?" }} <a href="{{ url_for('main.login' if mode == 'register' else 'main.register') }}">{{ "Sign in" if mode == "register" else "Create an account" }}</a></p>
+  </div>
+</section>
+{% endblock %}

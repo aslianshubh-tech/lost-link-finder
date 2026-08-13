@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}Dashboard{% endblock %}
+{% block content %}
+<section class="page-header">
+  <div class="container">
+    <p class="eyebrow">YOUR LOSTLINK</p>
+    <h1>Good morning, {{ g.user["full_name"].split()[0] }}.</h1>
+    <p>Keep an eye on your reports and any details that might connect them to a find.</p>
+  </div>
+</section>
+<section class="container page-content">
+  <div class="dashboard-actions">
+    <a class="button" href="{{ url_for('main.report', kind='lost') }}">+ Report lost item</a>
+    <a class="button button-ghost" href="{{ url_for('main.report', kind='found') }}">+ Report found item</a>
+    <a class="arrow-link" href="{{ url_for('main.my_reports') }}">View all my reports →</a>
+  </div>
+  <div class="stats-grid">
+    <div class="stat-card"><span class="stat-label">Lost reports</span><strong>{{ stats.lost }}</strong><span class="stat-caption">reported by you</span></div>
+    <div class="stat-card"><span class="stat-label">Found reports</span><strong>{{ stats.found }}</strong><span class="stat-caption">reported by you</span></div>
+    <div class="stat-card stat-accent"><span class="stat-label">Possible matches</span><strong>{{ stats.matches }}</strong><span class="stat-caption">60% score or higher</span></div>
+    <div class="stat-card"><span class="stat-label">Resolved items</span><strong>{{ stats.resolved }}</strong><span class="stat-caption">marked by you</span></div>
+  </div>
+  <div class="content-grid">
+    <div class="panel">
+      <div class="panel-heading"><div><p class="eyebrow">RECENT ACTIVITY</p><h2>Your latest reports</h2></div><a href="{{ url_for('main.my_reports') }}">See all</a></div>
+      {% if recent %}
+        <div class="report-list">
+          {% for report in recent %}
+            <a class="report-row" href="{{ url_for('main.item_detail', kind=report['kind'], item_id=report['id']) }}">
+              <span class="report-icon {{ report['kind'] }}">{{ "L" if report["kind"] == "lost" else "F" }}</span>
+              <span class="report-info"><strong>{{ report["item_name"] }}</strong><small>{{ report["category"] }} · {{ report["location"] }}</small></span>
+              <span class="status status-{{ report['status'] }}">{{ report["status"].replace("_", " ") }}</span>
+            </a>
+          {% endfor %}
+        </div>
+      {% else %}
+        <div class="empty-state compact"><span class="empty-icon">+</span><h3>No reports yet</h3><p>Once you report something, it will appear here.</p><a class="arrow-link" href="{{ url_for('main.report', kind='lost') }}">Create your first report →</a></div>
+      {% endif %}
+    </div>
+    <aside class="tip-card"><span class="tip-icon">i</span><p class="eyebrow">A SMALL TIP</p><h3>Specific details make stronger matches.</h3><p>Include nearby landmarks, a distinctive mark, or what was inside the item when you can.</p></aside>
+  </div>
+</section>
+{% endblock %}

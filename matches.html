@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}Possible matches{% endblock %}
+{% block content %}
+<section class="page-header compact-header">
+  <div class="container"><p class="eyebrow">COMPARE REPORTS</p><h1>Possible matches</h1><p>These pairs scored 60% or higher. Look at the reasons, not just the number.</p></div>
+</section>
+<section class="container page-content">
+  {% if matches %}
+    <div class="matches-list">{% for match in matches %}
+      <article class="match-card">
+        <div class="match-summary"><div><span class="match-level {{ 'high' if match['score'] >= 80 else 'possible' }}">{{ "High match" if match['score'] >= 80 else "Possible match" }}</span><h2>{{ match['score'] }}% <small>match score</small></h2></div><a class="button button-small button-ghost" href="{{ url_for('main.item_detail', kind='lost', item_id=match['lost_item_id']) }}">Open lost report</a></div>
+        <div class="comparison"><div class="comparison-side"><span class="comparison-label">LOST REPORT</span><strong>{{ match['lost_name'] }}</strong><p>{{ match['lost_color'] }} · {{ match['lost_location'] }}<br>{{ match['lost_date'] }}</p></div><div class="comparison-mark">↔</div><div class="comparison-side"><span class="comparison-label">FOUND REPORT</span><strong>{{ match['found_name'] }}</strong><p>{{ match['found_color'] }} · {{ match['found_location'] }}<br>{{ match['found_date'] }}</p></div></div>
+        <div class="reason-list"><strong>Why this may be a match</strong>{% for reason in match['reasons'] %}<span>✓ {{ reason }}</span>{% endfor %}</div>
+        <div class="match-footer"><a class="arrow-link" href="{{ url_for('main.item_detail', kind='lost', item_id=match['lost_item_id']) }}">Compare full details →</a><a class="arrow-link" href="{{ url_for('main.item_detail', kind='found', item_id=match['found_item_id']) }}">View found report →</a></div>
+      </article>
+    {% endfor %}</div>
+  {% else %}
+    <div class="empty-state large"><span class="empty-icon">↔</span><h2>No possible matches yet</h2><p>When a lost and found report share enough details, they will appear here with a clear explanation.</p><a class="button" href="{{ url_for('main.report', kind='lost') }}">Add a report</a></div>
+  {% endif %}
+</section>
+{% endblock %}

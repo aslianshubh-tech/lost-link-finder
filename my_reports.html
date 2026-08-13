@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}My reports{% endblock %}
+{% block content %}
+<section class="page-header compact-header"><div class="container"><p class="eyebrow">YOUR REPORTS</p><h1>My reports</h1><p>Manage the items you have reported and mark them resolved when they make it home.</p></div></section>
+<section class="container page-content">
+  <div class="dashboard-actions"><a class="button" href="{{ url_for('main.report', kind='lost') }}">+ Report lost item</a><a class="button button-ghost" href="{{ url_for('main.report', kind='found') }}">+ Report found item</a></div>
+  {% if reports %}<div class="table-card"><div class="table-head"><span>Item</span><span>Type</span><span>Location</span><span>Status</span><span></span></div>{% for report in reports %}<div class="table-row"><a href="{{ url_for('main.item_detail', kind=report['kind'], item_id=report['id']) }}"><strong>{{ report['item_name'] }}</strong><small>{{ report['category'] }} · {{ report['color'] }}</small></a><span class="type-pill {{ report['kind'] }}">{{ report['kind'] }}</span><span>{{ report['location'] }}</span><span class="status status-{{ report['status'] }}">{{ report['status'].replace("_", " ") }}</span><span>{% if report['status'] != 'resolved' %}<form method="post" action="{{ url_for('main.resolve', kind=report['kind'], item_id=report['id']) }}"><button class="small-action" type="submit">Mark resolved</button></form>{% else %}<span class="resolved-check">Done</span>{% endif %}</span></div>{% endfor %}</div>{% else %}<div class="empty-state large"><span class="empty-icon">+</span><h2>Your reports will live here</h2><p>Report a lost or found item to start building your campus trail.</p><a class="button" href="{{ url_for('main.report', kind='lost') }}">Create a report</a></div>{% endif %}
+</section>
+{% endblock %}

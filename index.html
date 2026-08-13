@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% block title %}Home{% endblock %}
+{% block content %}
+<section class="hero">
+  <div class="container hero-grid">
+    <div class="hero-copy">
+      <p class="eyebrow">A small idea for a better campus</p>
+      <h1>Lost something?<br><em>Someone may have found it.</em></h1>
+      <p class="hero-lede">LostLink gives students one simple place to report belongings, browse campus finds, and see when two reports look like they belong together.</p>
+      <div class="hero-actions">
+        <a class="button" href="{{ url_for('main.report', kind='lost') }}">Report lost item <span>→</span></a>
+        <a class="button button-ghost" href="{{ url_for('main.report', kind='found') }}">Report found item</a>
+      </div>
+      <p class="quiet-note">You will need a free account to submit a report.</p>
+    </div>
+    <div class="hero-illustration" aria-label="Lost report connects to found report">
+      <div class="paper-card paper-lost">
+        <span class="card-kicker">LOST REPORT</span>
+        <span class="sketch-line wide"></span>
+        <span class="sketch-line medium"></span>
+        <span class="sketch-line short"></span>
+        <span class="card-stamp">?</span>
+      </div>
+      <div class="connection-line"><span>matching system</span><i>↓</i></div>
+      <div class="paper-card paper-found">
+        <span class="card-kicker">FOUND REPORT</span>
+        <span class="sketch-line wide"></span>
+        <span class="sketch-line medium"></span>
+        <span class="sketch-line short"></span>
+        <span class="card-stamp check">✓</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="section section-light">
+  <div class="container">
+    <div class="section-heading centered">
+      <p class="eyebrow">How LostLink helps</p>
+      <h2>From a missed item to a possible match.</h2>
+      <p>No guessing games or vague announcements. Each match includes the details that made it stand out.</p>
+    </div>
+    <div class="steps-grid">
+      <article class="step-card"><span class="step-number">01</span><h3>Report it</h3><p>Add the useful details: category, color, location, date, time, and a description.</p></article>
+      <article class="step-card"><span class="step-number">02</span><h3>Compare reports</h3><p>LostLink uses a clear rule-based score across seven details. It is easy to understand.</p></article>
+      <article class="step-card"><span class="step-number">03</span><h3>Reconnect</h3><p>Browse a possible match, compare the reports, and use the reporter's contact details to follow up.</p></article>
+    </div>
+  </div>
+</section>
+
+<section class="section problem-section">
+  <div class="container problem-grid">
+    <div>
+      <p class="eyebrow">The campus problem</p>
+      <h2>A noticeboard is useful. A shared system is better.</h2>
+    </div>
+    <div>
+      <p>Students lose ID cards, calculators, notebooks, bags, keys, and more every semester. Someone else may find the item, but the two people rarely know where to look for each other.</p>
+      <a class="arrow-link" href="{{ url_for('main.about') }}">Learn more about the project <span>→</span></a>
+    </div>
+  </div>
+</section>
+{% endblock %}
