@@ -1,0 +1,1501 @@
+LOSTLINK — COMPLETE CODE GUIDE (LINE NUMBERED)
+=================================================
+
+Read the files in this order:
+1. app.py — Flask routes, SQLite database, authentication, uploads, and matching algorithm
+2. templates/ — the HTML pages
+3. static/css/style.css — the design
+4. static/js/script.js — small browser interactions
+5. requirements.txt — Python dependency
+
+This guide contains the current project code with line numbers restarting from 1 for each file.
+The database is intentionally not included because it is created automatically and starts empty.
+
+
+==============================================================================
+FILE: app.py
+==============================================================================
+0001 | from __future__ import annotations
+0002 | 
+0003 | import json
+0004 | import os
+0005 | import re
+0006 | import sqlite3
+0007 | import uuid
+0008 | from datetime import date, datetime
+0009 | from difflib import SequenceMatcher
+0010 | from functools import wraps
+0011 | from pathlib import Path
+0012 | from typing import Any, Callable
+0013 | 
+0014 | from flask import (
+0015 |     Blueprint,
+0016 |     Flask,
+0017 |     abort,
+0018 |     flash,
+0019 |     g,
+0020 |     redirect,
+0021 |     render_template,
+0022 |     request,
+0023 |     send_from_directory,
+0024 |     session,
+0025 |     url_for,
+0026 | )
+0027 | from werkzeug.exceptions import HTTPException
+0028 | from werkzeug.security import check_password_hash, generate_password_hash
+0029 | from werkzeug.utils import secure_filename
+0030 | 
+0031 | 
+0032 | APP_DIR = Path(__file__).resolve().parent
+0033 | INSTANCE_DIR = APP_DIR / "instance"
+0034 | UPLOAD_DIR = APP_DIR / "uploads"
+0035 | DATABASE_PATH = INSTANCE_DIR / "lostlink.sqlite3"
+0036 | if os.environ.get("LOSTLINK_DATABASE"):
+0037 |     DATABASE_PATH = Path(os.environ["LOSTLINK_DATABASE"]).expanduser().resolve()
+0038 | BASE_PATH = os.environ.get("BASE_PATH", "/api").rstrip("/") or ""
+0039 | 
+0040 | ALLOWED_CATEGORIES = [
+0041 |     "ID Card",
+0042 |     "Electronics",
+0043 |     "Books",
+0044 |     "Stationery",
+0045 |     "Bags",
+0046 |     "Clothing",
+0047 |     "Accessories",
+0048 |     "Keys",
+0049 |     "Other",
+0050 | ]
+0051 | ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "gif", "webp"}
+0052 | MATCH_THRESHOLDS = {"high": 80, "possible": 60}
+0053 | 
+0054 | 
+0055 | def create_app() -> Flask:
+0056 |     app = Flask(
+0057 |         __name__,
+0058 |         template_folder=str(APP_DIR / "templates"),
+0059 |         static_folder=str(APP_DIR / "static"),
+0060 |         static_url_path=f"{BASE_PATH}/static",
+0061 |     )
+0062 |     app.config.update(
+0063 |         SECRET_KEY=os.environ.get("SESSION_SECRET", "lostlink-development-secret"),
+0064 |         MAX_CONTENT_LENGTH=4 * 1024 * 1024,
+0065 |         SESSION_COOKIE_HTTPONLY=True,
+0066 |         SESSION_COOKIE_SAMESITE="Lax",
+0067 |     )
+0068 | 
+0069 |     INSTANCE_DIR.mkdir(exist_ok=True)
+0070 |     UPLOAD_DIR.mkdir(exist_ok=True)
+0071 |     init_db()
+0072 | 
+0073 |     main = Blueprint("main", __name__, url_prefix=BASE_PATH or None)
+0074 | 
+0075 |     @app.before_request
+0076 |     def load_logged_in_user() -> None:
+0077 |         user_id = session.get("user_id")
+0078 |         if user_id is None:
+0079 |             g.user = None
+0080 |         else:
+0081 |             g.user = query_db("SELECT id, full_name, email, phone FROM users WHERE id = ?", (user_id,), one=True)
+0082 | 
+0083 |     @app.context_processor
+0084 |     def inject_globals() -> dict[str, Any]:
+0085 |         return {"categories": ALLOWED_CATEGORIES, "match_thresholds": MATCH_THRESHOLDS}
+0086 | 
+0087 |     @main.route("/")
+0088 |     def home():
+0089 |         return render_template("index.html")
+0090 | 
+0091 |     @main.route("/register", methods=("GET", "POST"))
+0092 |     def register():
+0093 |         if g.user:
+0094 |             return redirect(url_for("main.dashboard"))
+0095 |         if request.method == "POST":
+0096 |             full_name = request.form.get("full_name", "").strip()
+0097 |             email = request.form.get("email", "").strip().lower()
+0098 |             password = request.form.get("password", "")
+0099 |             phone = request.form.get("phone", "").strip()
+0100 |             error = None
+0101 |             if len(full_name) < 2:
+0102 |                 error = "Please enter your full name."
+0103 |             elif not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+0104 |                 error = "Please enter a valid college email address."
+0105 |             elif len(password) < 8:
+0106 |                 error = "Password must be at least 8 characters."
+0107 |             elif query_db("SELECT id FROM users WHERE email = ?", (email,), one=True):
+0108 |                 error = "An account with this email already exists."
+0109 |             if error is None:
+0110 |                 execute_db(
+0111 |                     "INSERT INTO users (full_name, email, password_hash, phone) VALUES (?, ?, ?, ?)",
+0112 |                     (full_name, email, generate_password_hash(password), phone or None),
+0113 |                 )
+0114 |                 flash("Account created. You can now sign in.", "success")
+0115 |                 return redirect(url_for("main.login"))
+0116 |             flash(error, "error")
+0117 |         return render_template("auth.html", mode="register")
+0118 | 
+0119 |     @main.route("/login", methods=("GET", "POST"))
+0120 |     def login():
+0121 |         if g.user:
+0122 |             return redirect(url_for("main.dashboard"))
+0123 |         if request.method == "POST":
+0124 |             email = request.form.get("email", "").strip().lower()
+0125 |             password = request.form.get("password", "")
+0126 |             user = query_db("SELECT * FROM users WHERE email = ?", (email,), one=True)
+0127 |             if user is None or not check_password_hash(user["password_hash"], password):
+0128 |                 flash("Email or password is incorrect.", "error")
+0129 |             else:
+0130 |                 session.clear()
+0131 |                 session["user_id"] = user["id"]
+0132 |                 flash(f"Welcome back, {user['full_name'].split()[0]}.", "success")
+0133 |                 return redirect(url_for("main.dashboard"))
+0134 |         return render_template("auth.html", mode="login")
+0135 | 
+0136 |     @main.route("/logout", methods=("POST",))
+0137 |     def logout():
+0138 |         session.clear()
+0139 |         flash("You have been signed out.", "success")
+0140 |         return redirect(url_for("main.home"))
+0141 | 
+0142 |     @main.route("/dashboard")
+0143 |     @login_required
+0144 |     def dashboard():
+0145 |         user_id = g.user["id"]
+0146 |         stats = {
+0147 |             "lost": scalar_db("SELECT COUNT(*) FROM lost_items WHERE user_id = ?", (user_id,)),
+0148 |             "found": scalar_db("SELECT COUNT(*) FROM found_items WHERE user_id = ?", (user_id,)),
+0149 |             "matches": scalar_db(
+0150 |                 """SELECT COUNT(*) FROM matches m
+0151 |                    JOIN lost_items l ON l.id = m.lost_item_id
+0152 |                    JOIN found_items f ON f.id = m.found_item_id
+0153 |                    WHERE m.score >= ? AND (l.user_id = ? OR f.user_id = ?)""",
+0154 |                 (MATCH_THRESHOLDS["possible"], user_id, user_id),
+0155 |             ),
+0156 |             "resolved": scalar_db(
+0157 |                 """SELECT COUNT(*) FROM (
+0158 |                    SELECT id FROM lost_items WHERE user_id = ? AND status = 'resolved'
+0159 |                    UNION ALL
+0160 |                    SELECT id FROM found_items WHERE user_id = ? AND status = 'resolved'
+0161 |                 )""",
+0162 |                 (user_id, user_id),
+0163 |             ),
+0164 |         }
+0165 |         recent = query_db(
+0166 |             """SELECT id, item_name, category, location, status, created_at, 'lost' AS kind
+0167 |                FROM lost_items WHERE user_id = ?
+0168 |                UNION ALL
+0169 |                SELECT id, item_name, category, location, status, created_at, 'found' AS kind
+0170 |                FROM found_items WHERE user_id = ?
+0171 |                ORDER BY created_at DESC LIMIT 5""",
+0172 |             (user_id, user_id),
+0173 |         )
+0174 |         return render_template("dashboard.html", stats=stats, recent=recent)
+0175 | 
+0176 |     @main.route("/report/<kind>", methods=("GET", "POST"))
+0177 |     @login_required
+0178 |     def report(kind: str):
+0179 |         if kind not in {"lost", "found"}:
+0180 |             abort(404)
+0181 |         if request.method == "POST":
+0182 |             form_data, error = collect_report_form()
+0183 |             image_filename, upload_error = save_uploaded_image(request.files.get("image"))
+0184 |             error = error or upload_error
+0185 |             if error is None:
+0186 |                 table = f"{kind}_items"
+0187 |                 execute_db(
+0188 |                     f"""INSERT INTO {table}
+0189 |                     (user_id, item_name, category, color, description, location, item_date,
+0190 |                      approx_time, image_filename, additional_info)
+0191 |                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+0192 |                     (
+0193 |                         g.user["id"],
+0194 |                         form_data["item_name"],
+0195 |                         form_data["category"],
+0196 |                         form_data["color"],
+0197 |                         form_data["description"],
+0198 |                         form_data["location"],
+0199 |                         form_data["item_date"],
+0200 |                         form_data["approx_time"],
+0201 |                         image_filename,
+0202 |                         form_data["additional_info"],
+0203 |                     ),
+0204 |                 )
+0205 |                 recompute_matches()
+0206 |                 flash(f"{kind.title()} item report submitted.", "success")
+0207 |                 return redirect(url_for("main.my_reports"))
+0208 |             flash(error, "error")
+0209 |         return render_template("report_form.html", kind=kind)
+0210 | 
+0211 |     @main.route("/lost")
+0212 |     def lost_items():
+0213 |         items = browse_items("lost")
+0214 |         return render_template("browse.html", kind="lost", items=items)
+0215 | 
+0216 |     @main.route("/found")
+0217 |     def found_items():
+0218 |         items = browse_items("found")
+0219 |         return render_template("browse.html", kind="found", items=items)
+0220 | 
+0221 |     @main.route("/matches")
+0222 |     @login_required
+0223 |     def matches():
+0224 |         user_id = g.user["id"]
+0225 |         rows = query_db(
+0226 |             """SELECT m.*, l.item_name AS lost_name, l.category AS lost_category,
+0227 |                       l.color AS lost_color, l.location AS lost_location, l.item_date AS lost_date,
+0228 |                       l.description AS lost_description, l.image_filename AS lost_image,
+0229 |                       f.item_name AS found_name, f.category AS found_category,
+0230 |                       f.color AS found_color, f.location AS found_location, f.item_date AS found_date,
+0231 |                       f.description AS found_description, f.image_filename AS found_image,
+0232 |                       l.user_id AS lost_owner, f.user_id AS found_owner
+0233 |                FROM matches m
+0234 |                JOIN lost_items l ON l.id = m.lost_item_id
+0235 |                JOIN found_items f ON f.id = m.found_item_id
+0236 |                WHERE m.score >= ? AND (l.user_id = ? OR f.user_id = ?)
+0237 |                ORDER BY m.score DESC, m.created_at DESC""",
+0238 |             (MATCH_THRESHOLDS["possible"], user_id, user_id),
+0239 |         )
+0240 |         rows = [dict(row) for row in rows]
+0241 |         for row in rows:
+0242 |             row["reasons"] = json.loads(row["reasons"])
+0243 |         return render_template("matches.html", matches=rows)
+0244 | 
+0245 |     @main.route("/my-reports")
+0246 |     @login_required
+0247 |     def my_reports():
+0248 |         user_id = g.user["id"]
+0249 |         reports = query_db(
+0250 |             """SELECT id, item_name, category, color, location, item_date, status, created_at,
+0251 |                       'lost' AS kind FROM lost_items WHERE user_id = ?
+0252 |                UNION ALL
+0253 |                SELECT id, item_name, category, color, location, item_date, status, created_at,
+0254 |                       'found' AS kind FROM found_items WHERE user_id = ?
+0255 |                ORDER BY created_at DESC""",
+0256 |             (user_id, user_id),
+0257 |         )
+0258 |         return render_template("my_reports.html", reports=reports)
+0259 | 
+0260 |     @main.route("/item/<kind>/<int:item_id>")
+0261 |     def item_detail(kind: str, item_id: int):
+0262 |         if kind not in {"lost", "found"}:
+0263 |             abort(404)
+0264 |         item = query_db(
+0265 |             f"""SELECT i.*, u.full_name AS reporter_name, u.email AS reporter_email,
+0266 |                        u.phone AS reporter_phone
+0267 |                 FROM {kind}_items i JOIN users u ON u.id = i.user_id WHERE i.id = ?""",
+0268 |             (item_id,),
+0269 |             one=True,
+0270 |         )
+0271 |         if item is None:
+0272 |             abort(404)
+0273 |         related = []
+0274 |         if g.user:
+0275 |             if kind == "lost":
+0276 |                 related = query_db(
+0277 |                     """SELECT m.score, m.reasons, f.id, f.item_name, f.location, f.item_date
+0278 |                        FROM matches m JOIN found_items f ON f.id = m.found_item_id
+0279 |                        WHERE m.lost_item_id = ? AND m.score >= ?
+0280 |                        ORDER BY m.score DESC""",
+0281 |                     (item_id, MATCH_THRESHOLDS["possible"]),
+0282 |                 )
+0283 |             else:
+0284 |                 related = query_db(
+0285 |                     """SELECT m.score, m.reasons, l.id, l.item_name, l.location, l.item_date
+0286 |                        FROM matches m JOIN lost_items l ON l.id = m.lost_item_id
+0287 |                        WHERE m.found_item_id = ? AND m.score >= ?
+0288 |                        ORDER BY m.score DESC""",
+0289 |                     (item_id, MATCH_THRESHOLDS["possible"]),
+0290 |                 )
+0291 |             related = [dict(match) for match in related]
+0292 |             for match in related:
+0293 |                 match["reasons"] = json.loads(match["reasons"])
+0294 |         is_owner = bool(g.user and g.user["id"] == item["user_id"])
+0295 |         return render_template("item_detail.html", item=item, kind=kind, is_owner=is_owner, related=related)
+0296 | 
+0297 |     @main.route("/resolve/<kind>/<int:item_id>", methods=("POST",))
+0298 |     @login_required
+0299 |     def resolve(kind: str, item_id: int):
+0300 |         if kind not in {"lost", "found"}:
+0301 |             abort(404)
+0302 |         item = query_db(f"SELECT user_id FROM {kind}_items WHERE id = ?", (item_id,), one=True)
+0303 |         if item is None:
+0304 |             abort(404)
+0305 |         if item["user_id"] != g.user["id"]:
+0306 |             abort(403)
+0307 |         execute_db(f"UPDATE {kind}_items SET status = 'resolved' WHERE id = ?", (item_id,))
+0308 |         flash("Report marked as resolved.", "success")
+0309 |         return redirect(request.referrer or url_for("main.my_reports"))
+0310 | 
+0311 |     @main.route("/about")
+0312 |     def about():
+0313 |         return render_template("about.html")
+0314 | 
+0315 |     @main.route("/uploads/<path:filename>")
+0316 |     def uploaded_file(filename: str):
+0317 |         return send_from_directory(UPLOAD_DIR, filename)
+0318 | 
+0319 |     app.register_blueprint(main)
+0320 | 
+0321 |     @app.route(f"{BASE_PATH}/healthz" if BASE_PATH else "/healthz")
+0322 |     def healthz():
+0323 |         return {"status": "ok", "app": "LostLink"}
+0324 | 
+0325 |     @app.errorhandler(404)
+0326 |     def not_found(_error):
+0327 |         return render_template("error.html", title="Page not found", message="We couldn't find that LostLink page."), 404
+0328 | 
+0329 |     @app.errorhandler(403)
+0330 |     def forbidden(_error):
+0331 |         return render_template("error.html", title="Access not allowed", message="You can only manage your own reports."), 403
+0332 | 
+0333 |     @app.errorhandler(413)
+0334 |     def too_large(_error):
+0335 |         flash("That image is too large. Please choose a file under 4 MB.", "error")
+0336 |         return redirect(request.referrer or url_for("main.home"))
+0337 | 
+0338 |     @app.errorhandler(Exception)
+0339 |     def handle_error(error):
+0340 |         if isinstance(error, HTTPException):
+0341 |             return error
+0342 |         app.logger.exception("Unexpected application error", exc_info=error)
+0343 |         return render_template(
+0344 |             "error.html",
+0345 |             title="Something went wrong",
+0346 |             message="LostLink could not complete that request. Please try again.",
+0347 |         ), 500
+0348 | 
+0349 |     return app
+0350 | 
+0351 | 
+0352 | def login_required(view: Callable[..., Any]) -> Callable[..., Any]:
+0353 |     @wraps(view)
+0354 |     def wrapped_view(**kwargs: Any):
+0355 |         if g.user is None:
+0356 |             flash("Please sign in to continue.", "error")
+0357 |             return redirect(url_for("main.login", next=request.path))
+0358 |         return view(**kwargs)
+0359 | 
+0360 |     return wrapped_view
+0361 | 
+0362 | 
+0363 | def get_db() -> sqlite3.Connection:
+0364 |     if "db" not in g:
+0365 |         g.db = sqlite3.connect(DATABASE_PATH)
+0366 |         g.db.row_factory = sqlite3.Row
+0367 |         g.db.execute("PRAGMA foreign_keys = ON")
+0368 |     return g.db
+0369 | 
+0370 | 
+0371 | def close_db(_error: BaseException | None = None) -> None:
+0372 |     db = g.pop("db", None)
+0373 |     if db is not None:
+0374 |         db.close()
+0375 | 
+0376 | 
+0377 | def init_db() -> None:
+0378 |     INSTANCE_DIR.mkdir(exist_ok=True)
+0379 |     connection = sqlite3.connect(DATABASE_PATH)
+0380 |     connection.execute("PRAGMA foreign_keys = ON")
+0381 |     connection.executescript(
+0382 |         """
+0383 |         CREATE TABLE IF NOT EXISTS users (
+0384 |             id INTEGER PRIMARY KEY AUTOINCREMENT,
+0385 |             full_name TEXT NOT NULL,
+0386 |             email TEXT NOT NULL UNIQUE,
+0387 |             password_hash TEXT NOT NULL,
+0388 |             phone TEXT,
+0389 |             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+0390 |         );
+0391 |         CREATE TABLE IF NOT EXISTS lost_items (
+0392 |             id INTEGER PRIMARY KEY AUTOINCREMENT,
+0393 |             user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+0394 |             item_name TEXT NOT NULL,
+0395 |             category TEXT NOT NULL,
+0396 |             color TEXT NOT NULL,
+0397 |             description TEXT NOT NULL,
+0398 |             location TEXT NOT NULL,
+0399 |             item_date TEXT NOT NULL,
+0400 |             approx_time TEXT NOT NULL,
+0401 |             image_filename TEXT,
+0402 |             additional_info TEXT,
+0403 |             status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'possible_match', 'resolved')),
+0404 |             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+0405 |         );
+0406 |         CREATE TABLE IF NOT EXISTS found_items (
+0407 |             id INTEGER PRIMARY KEY AUTOINCREMENT,
+0408 |             user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+0409 |             item_name TEXT NOT NULL,
+0410 |             category TEXT NOT NULL,
+0411 |             color TEXT NOT NULL,
+0412 |             description TEXT NOT NULL,
+0413 |             location TEXT NOT NULL,
+0414 |             item_date TEXT NOT NULL,
+0415 |             approx_time TEXT NOT NULL,
+0416 |             image_filename TEXT,
+0417 |             additional_info TEXT,
+0418 |             status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'possible_match', 'resolved')),
+0419 |             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+0420 |         );
+0421 |         CREATE TABLE IF NOT EXISTS matches (
+0422 |             id INTEGER PRIMARY KEY AUTOINCREMENT,
+0423 |             lost_item_id INTEGER NOT NULL REFERENCES lost_items(id) ON DELETE CASCADE,
+0424 |             found_item_id INTEGER NOT NULL REFERENCES found_items(id) ON DELETE CASCADE,
+0425 |             score INTEGER NOT NULL,
+0426 |             reasons TEXT NOT NULL,
+0427 |             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+0428 |             UNIQUE(lost_item_id, found_item_id)
+0429 |         );
+0430 |         """
+0431 |     )
+0432 |     connection.commit()
+0433 |     connection.close()
+0434 | 
+0435 | 
+0436 | def query_db(sql: str, params: tuple[Any, ...] = (), one: bool = False) -> Any:
+0437 |     cursor = get_db().execute(sql, params)
+0438 |     rows = cursor.fetchall()
+0439 |     cursor.close()
+0440 |     return (rows[0] if rows else None) if one else rows
+0441 | 
+0442 | 
+0443 | def scalar_db(sql: str, params: tuple[Any, ...] = ()) -> int:
+0444 |     row = query_db(sql, params, one=True)
+0445 |     return int(row[0]) if row else 0
+0446 | 
+0447 | 
+0448 | def execute_db(sql: str, params: tuple[Any, ...] = ()) -> int:
+0449 |     db = get_db()
+0450 |     cursor = db.execute(sql, params)
+0451 |     db.commit()
+0452 |     lastrowid = cursor.lastrowid
+0453 |     cursor.close()
+0454 |     return int(lastrowid or 0)
+0455 | 
+0456 | 
+0457 | def collect_report_form() -> tuple[dict[str, str], str | None]:
+0458 |     values = {
+0459 |         "item_name": request.form.get("item_name", "").strip(),
+0460 |         "category": request.form.get("category", "").strip(),
+0461 |         "color": request.form.get("color", "").strip(),
+0462 |         "description": request.form.get("description", "").strip(),
+0463 |         "location": request.form.get("location", "").strip(),
+0464 |         "item_date": request.form.get("item_date", "").strip(),
+0465 |         "approx_time": request.form.get("approx_time", "").strip(),
+0466 |         "additional_info": request.form.get("additional_info", "").strip(),
+0467 |     }
+0468 |     required = ("item_name", "category", "color", "description", "location", "item_date", "approx_time")
+0469 |     if any(not values[field] for field in required):
+0470 |         return values, "Please complete all required report fields."
+0471 |     if values["category"] not in ALLOWED_CATEGORIES:
+0472 |         return values, "Please choose a category from the list."
+0473 |     try:
+0474 |         date.fromisoformat(values["item_date"])
+0475 |     except ValueError:
+0476 |         return values, "Please choose a valid date."
+0477 |     return values, None
+0478 | 
+0479 | 
+0480 | def save_uploaded_image(upload: Any) -> tuple[str | None, str | None]:
+0481 |     if upload is None or not upload.filename:
+0482 |         return None, None
+0483 |     original = secure_filename(upload.filename)
+0484 |     extension = original.rsplit(".", 1)[-1].lower() if "." in original else ""
+0485 |     if extension not in ALLOWED_EXTENSIONS:
+0486 |         return None, "Please upload a PNG, JPG, GIF, or WEBP image."
+0487 |     filename = f"{uuid.uuid4().hex}_{original}"
+0488 |     upload.save(UPLOAD_DIR / filename)
+0489 |     return filename, None
+0490 | 
+0491 | 
+0492 | def normalized(value: str | None) -> str:
+0493 |     return re.sub(r"\s+", " ", (value or "").lower().strip())
+0494 | 
+0495 | 
+0496 | def tokens(value: str | None) -> set[str]:
+0497 |     return set(re.findall(r"[a-z0-9]+", normalized(value)))
+0498 | 
+0499 | 
+0500 | def text_similarity(first: str | None, second: str | None) -> float:
+0501 |     a, b = normalized(first), normalized(second)
+0502 |     if not a or not b:
+0503 |         return 0.0
+0504 |     sequence = SequenceMatcher(None, a, b).ratio()
+0505 |     left, right = tokens(a), tokens(b)
+0506 |     overlap = len(left & right) / max(len(left | right), 1)
+0507 |     return max(sequence, overlap)
+0508 | 
+0509 | 
+0510 | def date_score(first: str, second: str) -> tuple[int, str | None]:
+0511 |     try:
+0512 |         days = abs((date.fromisoformat(first) - date.fromisoformat(second)).days)
+0513 |     except ValueError:
+0514 |         return 0, None
+0515 |     if days == 0:
+0516 |         return 10, "Same date"
+0517 |     if days <= 1:
+0518 |         return 8, "Similar date"
+0519 |     if days <= 3:
+0520 |         return 5, "Dates are close"
+0521 |     return 0, None
+0522 | 
+0523 | 
+0524 | def time_score(first: str, second: str) -> tuple[int, str | None]:
+0525 |     try:
+0526 |         a = datetime.strptime(first, "%H:%M")
+0527 |         b = datetime.strptime(second, "%H:%M")
+0528 |     except ValueError:
+0529 |         return 0, None
+0530 |     minutes = abs(int((a - b).total_seconds() / 60))
+0531 |     if minutes <= 60:
+0532 |         return 10, "Similar time"
+0533 |     if minutes <= 120:
+0534 |         return 8, "Approximate times are close"
+0535 |     if minutes <= 240:
+0536 |         return 5, "Times are in the same part of the day"
+0537 |     return 0, None
+0538 | 
+0539 | 
+0540 | def score_pair(lost: sqlite3.Row, found: sqlite3.Row) -> tuple[int, list[str]]:
+0541 |     score = 0
+0542 |     reasons: list[str] = []
+0543 |     if normalized(lost["category"]) == normalized(found["category"]):
+0544 |         score += 20
+0545 |         reasons.append("Same category")
+0546 | 
+0547 |     item_similarity = text_similarity(lost["item_name"], found["item_name"])
+0548 |     if item_similarity >= 0.75:
+0549 |         score += 20
+0550 |         reasons.append("Very similar item name")
+0551 |     elif item_similarity >= 0.45:
+0552 |         score += 12
+0553 |         reasons.append("Related item name")
+0554 | 
+0555 |     if normalized(lost["color"]) == normalized(found["color"]):
+0556 |         score += 15
+0557 |         reasons.append("Same color")
+0558 |     elif text_similarity(lost["color"], found["color"]) >= 0.6:
+0559 |         score += 8
+0560 |         reasons.append("Similar color")
+0561 | 
+0562 |     location_similarity = text_similarity(lost["location"], found["location"])
+0563 |     if location_similarity >= 0.8:
+0564 |         score += 15
+0565 |         reasons.append("Same location")
+0566 |     elif location_similarity >= 0.45:
+0567 |         score += 9
+0568 |         reasons.append("Nearby or similar location")
+0569 | 
+0570 |     points, reason = date_score(lost["item_date"], found["item_date"])
+0571 |     score += points
+0572 |     if reason:
+0573 |         reasons.append(reason)
+0574 |     points, reason = time_score(lost["approx_time"], found["approx_time"])
+0575 |     score += points
+0576 |     if reason:
+0577 |         reasons.append(reason)
+0578 | 
+0579 |     description_similarity = text_similarity(lost["description"], found["description"])
+0580 |     if description_similarity >= 0.55:
+0581 |         score += 10
+0582 |         reasons.append("Similar description")
+0583 |     elif description_similarity >= 0.3:
+0584 |         score += 5
+0585 |         reasons.append("Some description details overlap")
+0586 |     return min(score, 100), reasons
+0587 | 
+0588 | 
+0589 | def recompute_matches() -> None:
+0590 |     lost_items = query_db("SELECT * FROM lost_items WHERE status != 'resolved'")
+0591 |     found_items = query_db("SELECT * FROM found_items WHERE status != 'resolved'")
+0592 |     db = get_db()
+0593 |     for lost in lost_items:
+0594 |         for found in found_items:
+0595 |             score, reasons = score_pair(lost, found)
+0596 |             db.execute(
+0597 |                 """INSERT INTO matches (lost_item_id, found_item_id, score, reasons)
+0598 |                    VALUES (?, ?, ?, ?)
+0599 |                    ON CONFLICT(lost_item_id, found_item_id)
+0600 |                    DO UPDATE SET score = excluded.score, reasons = excluded.reasons""",
+0601 |                 (lost["id"], found["id"], score, json.dumps(reasons)),
+0602 |             )
+0603 |             if score >= MATCH_THRESHOLDS["possible"]:
+0604 |                 db.execute(
+0605 |                     "UPDATE lost_items SET status = 'possible_match' WHERE id = ? AND status = 'active'",
+0606 |                     (lost["id"],),
+0607 |                 )
+0608 |                 db.execute(
+0609 |                     "UPDATE found_items SET status = 'possible_match' WHERE id = ? AND status = 'active'",
+0610 |                     (found["id"],),
+0611 |                 )
+0612 |     db.commit()
+0613 | 
+0614 | 
+0615 | def browse_items(kind: str) -> list[sqlite3.Row]:
+0616 |     table = f"{kind}_items"
+0617 |     filters = []
+0618 |     params: list[str] = []
+0619 |     query = request.args.get("q", "").strip()
+0620 |     category = request.args.get("category", "").strip()
+0621 |     color = request.args.get("color", "").strip()
+0622 |     location = request.args.get("location", "").strip()
+0623 |     item_date = request.args.get("item_date", "").strip()
+0624 |     if query:
+0625 |         filters.append("(item_name LIKE ? OR category LIKE ? OR color LIKE ? OR location LIKE ? OR item_date LIKE ?)")
+0626 |         params.extend([f"%{query}%"] * 5)
+0627 |     if category:
+0628 |         filters.append("category = ?")
+0629 |         params.append(category)
+0630 |     if color:
+0631 |         filters.append("color LIKE ?")
+0632 |         params.append(f"%{color}%")
+0633 |     if location:
+0634 |         filters.append("location LIKE ?")
+0635 |         params.append(f"%{location}%")
+0636 |     if item_date:
+0637 |         filters.append("item_date = ?")
+0638 |         params.append(item_date)
+0639 |     where = f"WHERE {' AND '.join(filters)}" if filters else ""
+0640 |     return query_db(
+0641 |         f"""SELECT i.*, u.full_name AS reporter_name
+0642 |             FROM {table} i JOIN users u ON u.id = i.user_id
+0643 |             {where} ORDER BY i.created_at DESC""",
+0644 |         tuple(params),
+0645 |     )
+0646 | 
+0647 | 
+0648 | app = create_app()
+0649 | app.teardown_appcontext(close_db)
+0650 | 
+0651 | 
+0652 | if __name__ == "__main__":
+0653 |     port = int(os.environ.get("PORT", "5000"))
+0654 |     app.run(host="0.0.0.0", port=port, debug=False)
+
+==============================================================================
+FILE: requirements.txt
+==============================================================================
+0001 | Flask>=3.1.3
+
+==============================================================================
+FILE: README.md
+==============================================================================
+0001 | # LostLink
+0002 | 
+0003 | LostLink is a college lost and found system. Students can report belongings they lost or found, browse campus reports, and see transparent possible matches between the two kinds of reports.
+0004 | 
+0005 | ## Problem statement
+0006 | 
+0007 | Students often lose ID cards, calculators, books, notebooks, bags, water bottles, earphones, keys, and other belongings on campus. A different student may find the item but have no reliable way to identify its owner. LostLink gives both reports one shared place.
+0008 | 
+0009 | ## Objective
+0010 | 
+0011 | The objective is to make returning belongings easier without pretending to use artificial intelligence. LostLink uses an understandable rule-based score so a student can see why two reports may match.
+0012 | 
+0013 | ## Features
+0014 | 
+0015 | - Empty SQLite database on first start (no demo users or sample reports)
+0016 | - Account registration with hashed passwords
+0017 | - Login, logout, and session-protected personal pages
+0018 | - Lost and found item reports with optional local image uploads
+0019 | - Browse pages with item, category, color, location, and date filters
+0020 | - Matching across category, name, color, location, date, time, and description
+0021 | - High match (80–100%) and possible match (60–79%) levels
+0022 | - Human-readable reasons for each possible match
+0023 | - Personal dashboard, report management, and resolved status
+0024 | - Authorization checks so only the owner can resolve their report
+0025 | - Responsive student-friendly interface
+0026 | 
+0027 | ## Technology
+0028 | 
+0029 | - Python
+0030 | - Flask
+0031 | - SQLite
+0032 | - HTML5 templates
+0033 | - CSS3
+0034 | - Vanilla JavaScript
+0035 | 
+0036 | ## Database design
+0037 | 
+0038 | - `users`: account information and hashed password
+0039 | - `lost_items`: reports for items a student lost
+0040 | - `found_items`: reports for items a student found
+0041 | - `matches`: score and explanation for each lost/found pair
+0042 | 
+0043 | All report tables reference `users` with foreign keys. Created timestamps are stored automatically.
+0044 | 
+0045 | ## Matching algorithm
+0046 | 
+0047 | Each pair of reports can score up to 100 points:
+0048 | 
+0049 | | Detail | Points |
+0050 | | --- | ---: |
+0051 | | Category | 20 |
+0052 | | Item name similarity | 20 |
+0053 | | Color | 15 |
+0054 | | Location similarity | 15 |
+0055 | | Date proximity | 10 |
+0056 | | Time proximity | 10 |
+0057 | | Description similarity | 10 |
+0058 | 
+0059 | The app shows:
+0060 | 
+0061 | - 80–100: High match
+0062 | - 60–79: Possible match
+0063 | - Below 60: kept out of the prominent matches page
+0064 | 
+0065 | The score is only one part of the result. Each match also lists the details that contributed points, such as “Same category” or “Similar description.”
+0066 | 
+0067 | ## Folder structure
+0068 | 
+0069 | ```text
+0070 | app.py
+0071 | database: SQLite file created in instance/
+0072 | templates/          HTML pages
+0073 | static/css/         styles
+0074 | static/js/          small browser interactions
+0075 | uploads/            local report images
+0076 | requirements.txt
+0077 | ```
+0078 | 
+0079 | ## Installation
+0080 | 
+0081 | 1. Make sure Python 3.11 or newer is available.
+0082 | 2. Install the dependency:
+0083 | 
+0084 |    ```bash
+0085 |    pip install -r requirements.txt
+0086 |    ```
+0087 | 
+0088 | The first run creates `instance/lostlink.sqlite3` and `uploads/`. No sample records are inserted.
+0089 | 
+0090 | ## How to run
+0091 | 
+0092 | ```bash
+0093 | python app.py
+0094 | ```
+0095 | 
+0096 | The app uses `PORT` when it is provided by the environment and otherwise runs on port 5000.
+0097 | 
+0098 | ## How to test manually
+0099 | 
+0100 | 1. Open the home page and confirm the app has no fake counts or sample reports.
+0101 | 2. Register two accounts and sign in.
+0102 | 3. Submit one lost report and one found report with similar details.
+0103 | 4. Open Possible matches and read the score reasons.
+0104 | 5. Check the browse filters and item details pages.
+0105 | 6. Mark one of your own reports resolved.
+0106 | 7. Confirm another account cannot resolve that report.
+0107 | 8. Sign out and confirm protected pages redirect to sign in.
+0108 | 
+0109 | ## Future improvements
+0110 | 
+0111 | - Campus email-domain verification
+0112 | - Moderator review for sensitive items such as ID cards
+0113 | - Email notifications for strong matches
+0114 | - Optional campus building directory for better location matching
+0115 | - A report hand-off workflow when both students confirm a return
+
+==============================================================================
+FILE: templates/base.html
+==============================================================================
+0001 | <!doctype html>
+0002 | <html lang="en">
+0003 |   <head>
+0004 |     <meta charset="utf-8">
+0005 |     <meta name="viewport" content="width=device-width, initial-scale=1">
+0006 |     <title>{% block title %}LostLink{% endblock %} · LostLink</title>
+0007 |     <meta name="description" content="LostLink connects college lost and found reports with transparent matching.">
+0008 |     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+0009 |   </head>
+0010 |   <body>
+0011 |     <div class="site-shell">
+0012 |       <header class="topbar">
+0013 |         <a class="brand" href="{{ url_for('main.home') }}" aria-label="LostLink home">
+0014 |           <span class="brand-mark">LL</span>
+0015 |           <span><strong>LostLink</strong><small>Campus lost & found</small></span>
+0016 |         </a>
+0017 |         <button class="menu-toggle" type="button" aria-label="Toggle navigation" data-menu-toggle>Menu</button>
+0018 |         <nav class="nav-links" data-nav>
+0019 |           <a href="{{ url_for('main.home') }}">Home</a>
+0020 |           <a href="{{ url_for('main.lost_items') }}">Lost items</a>
+0021 |           <a href="{{ url_for('main.found_items') }}">Found items</a>
+0022 |           <a href="{{ url_for('main.about') }}">About</a>
+0023 |           {% if g.user %}
+0024 |             <span class="nav-divider"></span>
+0025 |             <a href="{{ url_for('main.dashboard') }}">Dashboard</a>
+0026 |             <a href="{{ url_for('main.matches') }}">Matches</a>
+0027 |             <form class="inline-form" method="post" action="{{ url_for('main.logout') }}">
+0028 |               <button class="text-button" type="submit">Sign out</button>
+0029 |             </form>
+0030 |           {% else %}
+0031 |             <a class="button button-small button-ghost" href="{{ url_for('main.login') }}">Sign in</a>
+0032 |             <a class="button button-small" href="{{ url_for('main.register') }}">Create account</a>
+0033 |           {% endif %}
+0034 |         </nav>
+0035 |       </header>
+0036 | 
+0037 |       <main>
+0038 |         {% with messages = get_flashed_messages(with_categories=true) %}
+0039 |           {% if messages %}
+0040 |             <div class="flash-stack container">
+0041 |               {% for category, message in messages %}
+0042 |                 <div class="flash flash-{{ category }}" role="status">{{ message }}<button type="button" class="flash-close" data-dismiss>×</button></div>
+0043 |               {% endfor %}
+0044 |             </div>
+0045 |           {% endif %}
+0046 |         {% endwith %}
+0047 |         {% block content %}{% endblock %}
+0048 |       </main>
+0049 | 
+0050 |       <footer class="footer">
+0051 |         <div class="container footer-inner">
+0052 |           <div>
+0053 |             <a class="brand footer-brand" href="{{ url_for('main.home') }}"><span class="brand-mark">LL</span><strong>LostLink</strong></a>
+0054 |             <p>A practical way for campus communities to return what matters.</p>
+0055 |           </div>
+0056 |           <div class="footer-links">
+0057 |             <a href="{{ url_for('main.about') }}">How it works</a>
+0058 |             <a href="{{ url_for('main.lost_items') }}">Browse lost</a>
+0059 |             <a href="{{ url_for('main.found_items') }}">Browse found</a>
+0060 |           </div>
+0061 |           <p class="footer-note">Built as a student project · No fake data, just real reports.</p>
+0062 |         </div>
+0063 |       </footer>
+0064 |     </div>
+0065 |     <script src="{{ url_for('static', filename='js/script.js') }}"></script>
+0066 |   </body>
+0067 | </html>
+
+==============================================================================
+FILE: templates/index.html
+==============================================================================
+0001 | {% extends "base.html" %}
+0002 | {% block title %}Home{% endblock %}
+0003 | {% block content %}
+0004 | <section class="hero">
+0005 |   <div class="container hero-grid">
+0006 |     <div class="hero-copy">
+0007 |       <p class="eyebrow">A small idea for a better campus</p>
+0008 |       <h1>Lost something?<br><em>Someone may have found it.</em></h1>
+0009 |       <p class="hero-lede">LostLink gives students one simple place to report belongings, browse campus finds, and see when two reports look like they belong together.</p>
+0010 |       <div class="hero-actions">
+0011 |         <a class="button" href="{{ url_for('main.report', kind='lost') }}">Report lost item <span>→</span></a>
+0012 |         <a class="button button-ghost" href="{{ url_for('main.report', kind='found') }}">Report found item</a>
+0013 |       </div>
+0014 |       <p class="quiet-note">You will need a free account to submit a report.</p>
+0015 |     </div>
+0016 |     <div class="hero-illustration" aria-label="Lost report connects to found report">
+0017 |       <div class="paper-card paper-lost">
+0018 |         <span class="card-kicker">LOST REPORT</span>
+0019 |         <span class="sketch-line wide"></span>
+0020 |         <span class="sketch-line medium"></span>
+0021 |         <span class="sketch-line short"></span>
+0022 |         <span class="card-stamp">?</span>
+0023 |       </div>
+0024 |       <div class="connection-line"><span>matching system</span><i>↓</i></div>
+0025 |       <div class="paper-card paper-found">
+0026 |         <span class="card-kicker">FOUND REPORT</span>
+0027 |         <span class="sketch-line wide"></span>
+0028 |         <span class="sketch-line medium"></span>
+0029 |         <span class="sketch-line short"></span>
+0030 |         <span class="card-stamp check">✓</span>
+0031 |       </div>
+0032 |     </div>
+0033 |   </div>
+0034 | </section>
+0035 | 
+0036 | <section class="section section-light">
+0037 |   <div class="container">
+0038 |     <div class="section-heading centered">
+0039 |       <p class="eyebrow">How LostLink helps</p>
+0040 |       <h2>From a missed item to a possible match.</h2>
+0041 |       <p>No guessing games or vague announcements. Each match includes the details that made it stand out.</p>
+0042 |     </div>
+0043 |     <div class="steps-grid">
+0044 |       <article class="step-card"><span class="step-number">01</span><h3>Report it</h3><p>Add the useful details: category, color, location, date, time, and a description.</p></article>
+0045 |       <article class="step-card"><span class="step-number">02</span><h3>Compare reports</h3><p>LostLink uses a clear rule-based score across seven details. It is easy to understand.</p></article>
+0046 |       <article class="step-card"><span class="step-number">03</span><h3>Reconnect</h3><p>Browse a possible match, compare the reports, and use the reporter's contact details to follow up.</p></article>
+0047 |     </div>
+0048 |   </div>
+0049 | </section>
+0050 | 
+0051 | <section class="section problem-section">
+0052 |   <div class="container problem-grid">
+0053 |     <div>
+0054 |       <p class="eyebrow">The campus problem</p>
+0055 |       <h2>A noticeboard is useful. A shared system is better.</h2>
+0056 |     </div>
+0057 |     <div>
+0058 |       <p>Students lose ID cards, calculators, notebooks, bags, keys, and more every semester. Someone else may find the item, but the two people rarely know where to look for each other.</p>
+0059 |       <a class="arrow-link" href="{{ url_for('main.about') }}">Learn more about the project <span>→</span></a>
+0060 |     </div>
+0061 |   </div>
+0062 | </section>
+0063 | {% endblock %}
+
+==============================================================================
+FILE: templates/auth.html
+==============================================================================
+0001 | {% extends "base.html" %}
+0002 | {% block title %}{{ "Create account" if mode == "register" else "Sign in" }}{% endblock %}
+0003 | {% block content %}
+0004 | <section class="auth-page">
+0005 |   <div class="auth-card">
+0006 |     <div class="auth-intro">
+0007 |       <span class="mini-mark">LL</span>
+0008 |       <p class="eyebrow">{{ "JOIN LOSTLINK" if mode == "register" else "WELCOME BACK" }}</p>
+0009 |       <h1>{{ "Make it easier to bring things home." if mode == "register" else "Good to see you again." }}</h1>
+0010 |       <p>{{ "Create an account to report a lost or found item and keep track of your reports." if mode == "register" else "Sign in to see your dashboard, reports, and possible matches." }}</p>
+0011 |     </div>
+0012 |     <form class="form-stack" method="post">
+0013 |       {% if mode == "register" %}
+0014 |         <label>Full name<input name="full_name" type="text" placeholder="e.g. Ananya Rao" required value="{{ request.form.get('full_name', '') }}"></label>
+0015 |       {% endif %}
+0016 |       <label>College email<input name="email" type="email" placeholder="you@college.edu" required value="{{ request.form.get('email', '') }}"></label>
+0017 |       {% if mode == "register" %}
+0018 |         <label>Phone number <span class="optional">optional</span><input name="phone" type="tel" placeholder="+91 98765 43210" value="{{ request.form.get('phone', '') }}"></label>
+0019 |       {% endif %}
+0020 |       <label>Password{% if mode == "register" %} <span class="optional">8 characters minimum</span>{% endif %}<input name="password" type="password" placeholder="Enter your password" required></label>
+0021 |       <button class="button button-full" type="submit">{{ "Create account" if mode == "register" else "Sign in" }} <span>→</span></button>
+0022 |     </form>
+0023 |     <p class="auth-switch">{{ "Already have an account?" if mode == "register" else "New to LostLink?" }} <a href="{{ url_for('main.login' if mode == 'register' else 'main.register') }}">{{ "Sign in" if mode == "register" else "Create an account" }}</a></p>
+0024 |   </div>
+0025 | </section>
+0026 | {% endblock %}
+
+==============================================================================
+FILE: templates/dashboard.html
+==============================================================================
+0001 | {% extends "base.html" %}
+0002 | {% block title %}Dashboard{% endblock %}
+0003 | {% block content %}
+0004 | <section class="page-header">
+0005 |   <div class="container">
+0006 |     <p class="eyebrow">YOUR LOSTLINK</p>
+0007 |     <h1>Good morning, {{ g.user["full_name"].split()[0] }}.</h1>
+0008 |     <p>Keep an eye on your reports and any details that might connect them to a find.</p>
+0009 |   </div>
+0010 | </section>
+0011 | <section class="container page-content">
+0012 |   <div class="dashboard-actions">
+0013 |     <a class="button" href="{{ url_for('main.report', kind='lost') }}">+ Report lost item</a>
+0014 |     <a class="button button-ghost" href="{{ url_for('main.report', kind='found') }}">+ Report found item</a>
+0015 |     <a class="arrow-link" href="{{ url_for('main.my_reports') }}">View all my reports →</a>
+0016 |   </div>
+0017 |   <div class="stats-grid">
+0018 |     <div class="stat-card"><span class="stat-label">Lost reports</span><strong>{{ stats.lost }}</strong><span class="stat-caption">reported by you</span></div>
+0019 |     <div class="stat-card"><span class="stat-label">Found reports</span><strong>{{ stats.found }}</strong><span class="stat-caption">reported by you</span></div>
+0020 |     <div class="stat-card stat-accent"><span class="stat-label">Possible matches</span><strong>{{ stats.matches }}</strong><span class="stat-caption">60% score or higher</span></div>
+0021 |     <div class="stat-card"><span class="stat-label">Resolved items</span><strong>{{ stats.resolved }}</strong><span class="stat-caption">marked by you</span></div>
+0022 |   </div>
+0023 |   <div class="content-grid">
+0024 |     <div class="panel">
+0025 |       <div class="panel-heading"><div><p class="eyebrow">RECENT ACTIVITY</p><h2>Your latest reports</h2></div><a href="{{ url_for('main.my_reports') }}">See all</a></div>
+0026 |       {% if recent %}
+0027 |         <div class="report-list">
+0028 |           {% for report in recent %}
+0029 |             <a class="report-row" href="{{ url_for('main.item_detail', kind=report['kind'], item_id=report['id']) }}">
+0030 |               <span class="report-icon {{ report['kind'] }}">{{ "L" if report["kind"] == "lost" else "F" }}</span>
+0031 |               <span class="report-info"><strong>{{ report["item_name"] }}</strong><small>{{ report["category"] }} · {{ report["location"] }}</small></span>
+0032 |               <span class="status status-{{ report['status'] }}">{{ report["status"].replace("_", " ") }}</span>
+0033 |             </a>
+0034 |           {% endfor %}
+0035 |         </div>
+0036 |       {% else %}
+0037 |         <div class="empty-state compact"><span class="empty-icon">+</span><h3>No reports yet</h3><p>Once you report something, it will appear here.</p><a class="arrow-link" href="{{ url_for('main.report', kind='lost') }}">Create your first report →</a></div>
+0038 |       {% endif %}
+0039 |     </div>
+0040 |     <aside class="tip-card"><span class="tip-icon">i</span><p class="eyebrow">A SMALL TIP</p><h3>Specific details make stronger matches.</h3><p>Include nearby landmarks, a distinctive mark, or what was inside the item when you can.</p></aside>
+0041 |   </div>
+0042 | </section>
+0043 | {% endblock %}
+
+==============================================================================
+FILE: templates/report_form.html
+==============================================================================
+0001 | {% extends "base.html" %}
+0002 | {% block title %}Report {{ kind }} item{% endblock %}
+0003 | {% block content %}
+0004 | <section class="page-header compact-header">
+0005 |   <div class="container">
+0006 |     <a class="back-link" href="{{ url_for('main.dashboard') }}">← Back to dashboard</a>
+0007 |     <p class="eyebrow">NEW {{ kind.upper() }} REPORT</p>
+0008 |     <h1>Tell us what happened.</h1>
+0009 |     <p>The more useful detail you add, the easier it is to compare this report with a possible match.</p>
+0010 |   </div>
+0011 | </section>
+0012 | <section class="container form-page">
+0013 |   <form class="report-form" method="post" enctype="multipart/form-data">
+0014 |     <div class="form-section"><p class="eyebrow">ITEM DETAILS</p><div class="form-grid">
+0015 |       <label>Item name<input name="item_name" required placeholder="e.g. Black scientific calculator" value="{{ request.form.get('item_name', '') }}"></label>
+0016 |       <label>Category<select name="category" required><option value="">Choose a category</option>{% for category in categories %}<option {{ "selected" if request.form.get("category") == category }}>{{ category }}</option>{% endfor %}</select></label>
+0017 |       <label>Color<input name="color" required placeholder="e.g. Black" value="{{ request.form.get('color', '') }}"></label>
+0018 |       <label>{{ "Last seen" if kind == "lost" else "Found" }} location<input name="location" required placeholder="e.g. Central library, 2nd floor" value="{{ request.form.get('location', '') }}"></label>
+0019 |     </div></div>
+0020 |     <div class="form-section"><p class="eyebrow">WHEN & WHAT IT LOOKS LIKE</p><div class="form-grid">
+0021 |       <label>Date<input name="item_date" type="date" required value="{{ request.form.get('item_date', '') }}"></label>
+0022 |       <label>Approximate time<input name="approx_time" type="time" required value="{{ request.form.get('approx_time', '') }}"></label>
+0023 |       <label class="full-width">Description<textarea name="description" rows="4" required placeholder="Describe the item and any marks, stickers, or identifying details.">{{ request.form.get('description', '') }}</textarea></label>
+0024 |       <label class="full-width">Additional information <span class="optional">optional</span><textarea name="additional_info" rows="3" placeholder="Anything else that could help?">{{ request.form.get('additional_info', '') }}</textarea></label>
+0025 |     </div></div>
+0026 |     <div class="form-section"><p class="eyebrow">OPTIONAL PHOTO</p><label class="upload-box"><span class="upload-icon">↑</span><span><strong>Choose an image</strong><small>PNG, JPG, GIF or WEBP · up to 4 MB</small></span><input name="image" type="file" accept=".png,.jpg,.jpeg,.gif,.webp" data-file-input></label><p class="file-name" data-file-name>No image selected</p></div>
+0027 |     <div class="form-actions"><a class="button button-ghost" href="{{ url_for('main.dashboard') }}">Cancel</a><button class="button" type="submit">Submit {{ kind }} report <span>→</span></button></div>
+0028 |   </form>
+0029 | </section>
+0030 | {% endblock %}
+
+==============================================================================
+FILE: templates/browse.html
+==============================================================================
+0001 | {% extends "base.html" %}
+0002 | {% block title %}Browse {{ kind }} items{% endblock %}
+0003 | {% block content %}
+0004 | <section class="page-header compact-header">
+0005 |   <div class="container">
+0006 |     <p class="eyebrow">CAMPUS BOARD</p>
+0007 |     <h1>{{ "Lost" if kind == "lost" else "Found" }} items</h1>
+0008 |     <p>{{ "See what students are looking for." if kind == "lost" else "See what students have found on campus." }}</p>
+0009 |   </div>
+0010 | </section>
+0011 | <section class="container page-content">
+0012 |   <form class="filter-bar" method="get">
+0013 |     <label class="filter-search"><span>⌕</span><input name="q" value="{{ request.args.get('q', '') }}" placeholder="Search item, color, place or date"></label>
+0014 |     <select name="category"><option value="">All categories</option>{% for category in categories %}<option {{ "selected" if request.args.get("category") == category }}>{{ category }}</option>{% endfor %}</select>
+0015 |     <input name="color" value="{{ request.args.get('color', '') }}" placeholder="Color">
+0016 |     <input name="location" value="{{ request.args.get('location', '') }}" placeholder="Location">
+0017 |     <input name="item_date" type="date" value="{{ request.args.get('item_date', '') }}">
+0018 |     <button class="button button-small" type="submit">Filter</button>
+0019 |     {% if request.args %}<a class="clear-link" href="{{ url_for('main.lost_items' if kind == 'lost' else 'main.found_items') }}">Clear</a>{% endif %}
+0020 |   </form>
+0021 |   {% if items %}
+0022 |     <div class="browse-grid">{% for item in items %}<a class="item-card" href="{{ url_for('main.item_detail', kind=kind, item_id=item['id']) }}">{% if item['image_filename'] %}<img src="{{ url_for('main.uploaded_file', filename=item['image_filename']) }}" alt="{{ item['item_name'] }}">{% else %}<div class="item-placeholder {{ kind }}"><span>{{ "L" if kind == "lost" else "F" }}</span></div>{% endif %}<div class="item-card-body"><div class="item-card-top"><span class="category-label">{{ item['category'] }}</span><span class="status status-{{ item['status'] }}">{{ item['status'].replace("_", " ") }}</span></div><h3>{{ item['item_name'] }}</h3><p>{{ item['color'] }} · {{ item['location'] }}</p><small>Reported by {{ item['reporter_name'] }} · {{ item['item_date'] }}</small></div></a>{% endfor %}</div>
+0023 |   {% else %}
+0024 |     <div class="empty-state large"><span class="empty-icon">{{ "L" if kind == "lost" else "F" }}</span><h2>No {{ kind }} items found</h2><p>{% if request.args %}Try removing a filter or searching for something else.{% else %}No {{ kind }} items have been reported yet.{% endif %}</p>{% if g.user %}<a class="button" href="{{ url_for('main.report', kind=kind) }}">Report a {{ kind }} item</a>{% else %}<a class="button" href="{{ url_for('main.register') }}">Create an account to report</a>{% endif %}</div>
+0025 |   {% endif %}
+0026 | </section>
+0027 | {% endblock %}
+
+==============================================================================
+FILE: templates/matches.html
+==============================================================================
+0001 | {% extends "base.html" %}
+0002 | {% block title %}Possible matches{% endblock %}
+0003 | {% block content %}
+0004 | <section class="page-header compact-header">
+0005 |   <div class="container"><p class="eyebrow">COMPARE REPORTS</p><h1>Possible matches</h1><p>These pairs scored 60% or higher. Look at the reasons, not just the number.</p></div>
+0006 | </section>
+0007 | <section class="container page-content">
+0008 |   {% if matches %}
+0009 |     <div class="matches-list">{% for match in matches %}
+0010 |       <article class="match-card">
+0011 |         <div class="match-summary"><div><span class="match-level {{ 'high' if match['score'] >= 80 else 'possible' }}">{{ "High match" if match['score'] >= 80 else "Possible match" }}</span><h2>{{ match['score'] }}% <small>match score</small></h2></div><a class="button button-small button-ghost" href="{{ url_for('main.item_detail', kind='lost', item_id=match['lost_item_id']) }}">Open lost report</a></div>
+0012 |         <div class="comparison"><div class="comparison-side"><span class="comparison-label">LOST REPORT</span><strong>{{ match['lost_name'] }}</strong><p>{{ match['lost_color'] }} · {{ match['lost_location'] }}<br>{{ match['lost_date'] }}</p></div><div class="comparison-mark">↔</div><div class="comparison-side"><span class="comparison-label">FOUND REPORT</span><strong>{{ match['found_name'] }}</strong><p>{{ match['found_color'] }} · {{ match['found_location'] }}<br>{{ match['found_date'] }}</p></div></div>
+0013 |         <div class="reason-list"><strong>Why this may be a match</strong>{% for reason in match['reasons'] %}<span>✓ {{ reason }}</span>{% endfor %}</div>
+0014 |         <div class="match-footer"><a class="arrow-link" href="{{ url_for('main.item_detail', kind='lost', item_id=match['lost_item_id']) }}">Compare full details →</a><a class="arrow-link" href="{{ url_for('main.item_detail', kind='found', item_id=match['found_item_id']) }}">View found report →</a></div>
+0015 |       </article>
+0016 |     {% endfor %}</div>
+0017 |   {% else %}
+0018 |     <div class="empty-state large"><span class="empty-icon">↔</span><h2>No possible matches yet</h2><p>When a lost and found report share enough details, they will appear here with a clear explanation.</p><a class="button" href="{{ url_for('main.report', kind='lost') }}">Add a report</a></div>
+0019 |   {% endif %}
+0020 | </section>
+0021 | {% endblock %}
+
+==============================================================================
+FILE: templates/my_reports.html
+==============================================================================
+0001 | {% extends "base.html" %}
+0002 | {% block title %}My reports{% endblock %}
+0003 | {% block content %}
+0004 | <section class="page-header compact-header"><div class="container"><p class="eyebrow">YOUR REPORTS</p><h1>My reports</h1><p>Manage the items you have reported and mark them resolved when they make it home.</p></div></section>
+0005 | <section class="container page-content">
+0006 |   <div class="dashboard-actions"><a class="button" href="{{ url_for('main.report', kind='lost') }}">+ Report lost item</a><a class="button button-ghost" href="{{ url_for('main.report', kind='found') }}">+ Report found item</a></div>
+0007 |   {% if reports %}<div class="table-card"><div class="table-head"><span>Item</span><span>Type</span><span>Location</span><span>Status</span><span></span></div>{% for report in reports %}<div class="table-row"><a href="{{ url_for('main.item_detail', kind=report['kind'], item_id=report['id']) }}"><strong>{{ report['item_name'] }}</strong><small>{{ report['category'] }} · {{ report['color'] }}</small></a><span class="type-pill {{ report['kind'] }}">{{ report['kind'] }}</span><span>{{ report['location'] }}</span><span class="status status-{{ report['status'] }}">{{ report['status'].replace("_", " ") }}</span><span>{% if report['status'] != 'resolved' %}<form method="post" action="{{ url_for('main.resolve', kind=report['kind'], item_id=report['id']) }}"><button class="small-action" type="submit">Mark resolved</button></form>{% else %}<span class="resolved-check">Done</span>{% endif %}</span></div>{% endfor %}</div>{% else %}<div class="empty-state large"><span class="empty-icon">+</span><h2>Your reports will live here</h2><p>Report a lost or found item to start building your campus trail.</p><a class="button" href="{{ url_for('main.report', kind='lost') }}">Create a report</a></div>{% endif %}
+0008 | </section>
+0009 | {% endblock %}
+
+==============================================================================
+FILE: templates/item_detail.html
+==============================================================================
+0001 | {% extends "base.html" %}
+0002 | {% block title %}{{ item["item_name"] }}{% endblock %}
+0003 | {% block content %}
+0004 | <section class="container detail-page">
+0005 |   <a class="back-link" href="{{ url_for('main.lost_items' if kind == 'lost' else 'main.found_items') }}">← Back to {{ kind }} items</a>
+0006 |   <div class="detail-grid">
+0007 |     <div class="detail-image">{% if item['image_filename'] %}<img src="{{ url_for('main.uploaded_file', filename=item['image_filename']) }}" alt="{{ item['item_name'] }}">{% else %}<div class="detail-placeholder {{ kind }}">{{ "LOST" if kind == "lost" else "FOUND" }}</div>{% endif %}</div>
+0008 |     <div class="detail-copy"><div class="detail-meta"><span class="type-pill {{ kind }}">{{ kind }} report</span><span class="status status-{{ item['status'] }}">{{ item['status'].replace("_", " ") }}</span></div><h1>{{ item["item_name"] }}</h1><p class="detail-subtitle">{{ item["color"] }} · {{ item["category"] }}</p><dl class="detail-facts"><div><dt>Location</dt><dd>{{ item["location"] }}</dd></div><div><dt>Date & time</dt><dd>{{ item["item_date"] }} at {{ item["approx_time"] }}</dd></div><div><dt>Description</dt><dd>{{ item["description"] }}</dd></div>{% if item["additional_info"] %}<div><dt>Additional information</dt><dd>{{ item["additional_info"] }}</dd></div>{% endif %}</dl><div class="reporter-box"><span class="eyebrow">REPORTED BY</span><strong>{{ item["reporter_name"] }}</strong>{% if g.user and g.user["id"] != item["user_id"] %}<a href="mailto:{{ item['reporter_email'] }}">Email reporter →</a>{% if item['reporter_phone'] %}<span>{{ item['reporter_phone'] }}</span>{% endif %}{% else %}<span>Contact details are visible to signed-in students.</span>{% endif %}</div>{% if is_owner and item['status'] != 'resolved' %}<form method="post" action="{{ url_for('main.resolve', kind=kind, item_id=item['id']) }}"><button class="button button-ghost" type="submit">Mark this report resolved</button></form>{% endif %}</div>
+0009 |   </div>
+0010 |   {% if related %}<section class="related-section"><p class="eyebrow">POSSIBLE CONNECTIONS</p><h2>This report may connect to</h2><div class="related-grid">{% for match in related %}<a class="related-card" href="{{ url_for('main.item_detail', kind='found' if kind == 'lost' else 'lost', item_id=match['id']) }}"><span class="match-level {{ 'high' if match['score'] >= 80 else 'possible' }}">{{ match['score'] }}% match</span><strong>{{ match['item_name'] }}</strong><span>{{ match['location'] }} · {{ match['item_date'] }}</span><small>{{ match['reasons']|join(' · ') }}</small></a>{% endfor %}</div></section>{% endif %}
+0011 | </section>
+0012 | {% endblock %}
+
+==============================================================================
+FILE: templates/about.html
+==============================================================================
+0001 | {% extends "base.html" %}
+0002 | {% block title %}About{% endblock %}
+0003 | {% block content %}
+0004 | <section class="page-header about-header"><div class="container"><p class="eyebrow">ABOUT THE PROJECT</p><h1>A practical answer to a common campus problem.</h1><p>LostLink is a student-friendly lost and found system built to make one small part of college life less frustrating.</p></div></section>
+0005 | <section class="container about-content"><div class="about-block"><span class="about-number">01</span><div><h2>The problem</h2><p>Students often lose belongings on campus and there is no centralized system to connect lost and found reports. A message in a group chat can disappear before the right person sees it.</p></div></div><div class="about-block"><span class="about-number">02</span><div><h2>The solution</h2><p>LostLink lets students report lost and found items, browse what is already on campus, and see possible connections. Its rule-based matching system checks category, name, color, location, date, time, and description.</p></div></div><div class="about-block"><span class="about-number">03</span><div><h2>The technology</h2><div class="tech-list"><span>Python</span><span>Flask</span><span>SQLite</span><span>HTML</span><span>CSS</span><span>JavaScript</span></div><p>There is no AI or machine learning behind the matches. The score is intentionally transparent so students can understand why two reports were connected.</p></div></div></section>
+0006 | {% endblock %}
+
+==============================================================================
+FILE: templates/error.html
+==============================================================================
+0001 | {% extends "base.html" %}
+0002 | {% block title %}{{ title }}{% endblock %}
+0003 | {% block content %}<section class="empty-state error-state"><span class="empty-icon">!</span><h1>{{ title }}</h1><p>{{ message }}</p><a class="button" href="{{ url_for('main.home') }}">Back to home</a></section>{% endblock %}
+
+==============================================================================
+FILE: static/css/style.css
+==============================================================================
+0001 | @import url("https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap");
+0002 | 
+0003 | :root {
+0004 |   --ink: #17201e;
+0005 |   --muted: #66716c;
+0006 |   --line: #dfe6e1;
+0007 |   --paper: #f6f8f5;
+0008 |   --white: #ffffff;
+0009 |   --accent: #177a67;
+0010 |   --accent-dark: #105d50;
+0011 |   --accent-soft: #e0f1eb;
+0012 |   --yellow: #f4c95d;
+0013 |   --danger: #ae4b48;
+0014 |   --shadow: 0 16px 40px rgba(24, 54, 44, 0.08);
+0015 | }
+0016 | 
+0017 | * { box-sizing: border-box; }
+0018 | html { scroll-behavior: smooth; }
+0019 | body { margin: 0; color: var(--ink); background: var(--paper); font: 15px/1.6 "DM Sans", sans-serif; }
+0020 | a { color: inherit; text-decoration: none; }
+0021 | button, input, select, textarea { font: inherit; }
+0022 | button, a { -webkit-tap-highlight-color: transparent; }
+0023 | .container { width: min(1120px, calc(100% - 44px)); margin: 0 auto; }
+0024 | .site-shell { min-height: 100vh; display: flex; flex-direction: column; }
+0025 | main { flex: 1; }
+0026 | 
+0027 | .topbar { height: 78px; padding: 0 max(22px, calc((100% - 1120px) / 2)); display: flex; align-items: center; justify-content: space-between; gap: 20px; background: rgba(246,248,245,.94); border-bottom: 1px solid rgba(223,230,225,.75); position: sticky; top: 0; z-index: 10; backdrop-filter: blur(14px); }
+0028 | .brand { display: inline-flex; align-items: center; gap: 10px; white-space: nowrap; }
+0029 | .brand strong { display: block; font: 700 21px/1 "Space Grotesk", sans-serif; letter-spacing: -.04em; }
+0030 | .brand small { display: block; color: var(--muted); font-size: 10px; line-height: 1.3; letter-spacing: .03em; }
+0031 | .brand-mark, .mini-mark { width: 36px; height: 36px; display: grid; place-items: center; border-radius: 10px 10px 10px 3px; color: #fff; background: var(--accent); font: 700 12px "Space Grotesk", sans-serif; letter-spacing: -.08em; }
+0032 | .nav-links { display: flex; align-items: center; gap: 19px; color: #4f5c56; font-size: 13px; }
+0033 | .nav-links a:hover, .footer-links a:hover { color: var(--accent); }
+0034 | .nav-divider { height: 24px; width: 1px; background: var(--line); }
+0035 | .inline-form { margin: 0; }
+0036 | .text-button { border: 0; padding: 0; color: #4f5c56; cursor: pointer; background: transparent; }
+0037 | .text-button:hover { color: var(--accent); }
+0038 | .menu-toggle { display: none; border: 1px solid var(--line); padding: 8px 12px; border-radius: 7px; color: var(--ink); background: transparent; }
+0039 | 
+0040 | .button { display: inline-flex; align-items: center; justify-content: center; gap: 12px; min-height: 47px; padding: 0 20px; border: 1px solid var(--accent); border-radius: 7px; background: var(--accent); color: #fff; cursor: pointer; font-weight: 700; transition: .2s ease; }
+0041 | .button:hover { background: var(--accent-dark); border-color: var(--accent-dark); transform: translateY(-1px); }
+0042 | .button-ghost { background: transparent; color: var(--accent-dark); }
+0043 | .button-ghost:hover { color: #fff; background: var(--accent); }
+0044 | .button-small { min-height: 36px; padding: 0 14px; font-size: 12px; }
+0045 | .button-full { width: 100%; margin-top: 7px; }
+0046 | .arrow-link { display: inline-flex; align-items: center; gap: 10px; color: var(--accent-dark); font-weight: 700; font-size: 13px; }
+0047 | .arrow-link span { transition: transform .2s ease; }
+0048 | .arrow-link:hover span { transform: translateX(4px); }
+0049 | .back-link { display: inline-block; margin-bottom: 27px; color: var(--muted); font-size: 13px; }
+0050 | .back-link:hover { color: var(--accent); }
+0051 | .eyebrow { margin: 0 0 11px; color: var(--accent); font-size: 10px; font-weight: 700; letter-spacing: .18em; }
+0052 | h1, h2, h3, p { margin-top: 0; }
+0053 | h1, h2, h3 { font-family: "Space Grotesk", sans-serif; letter-spacing: -.045em; }
+0054 | 
+0055 | .hero { overflow: hidden; padding: 92px 0 100px; background: #f0f5f1; }
+0056 | .hero-grid { display: grid; grid-template-columns: 1.06fr .94fr; align-items: center; gap: 70px; }
+0057 | .hero h1 { margin-bottom: 24px; font-size: clamp(43px, 6vw, 76px); line-height: 1.02; font-weight: 600; }
+0058 | .hero h1 em { color: var(--accent); font-style: normal; }
+0059 | .hero-lede { max-width: 495px; margin-bottom: 30px; color: #59665f; font-size: 17px; }
+0060 | .hero-actions { display: flex; flex-wrap: wrap; gap: 11px; }
+0061 | .quiet-note { margin: 15px 0 0; color: #829087; font-size: 12px; }
+0062 | .hero-illustration { min-height: 410px; position: relative; display: grid; place-items: center; }
+0063 | .paper-card { width: min(280px, 72%); min-height: 181px; padding: 23px; position: absolute; border: 1px solid rgba(38,87,69,.13); border-radius: 4px; background: #fffef7; box-shadow: 0 13px 25px rgba(40,72,55,.1); transform: rotate(-6deg); }
+0064 | .paper-lost { left: 7%; top: 30px; }
+0065 | .paper-found { right: 5%; bottom: 25px; transform: rotate(5deg); background: #f8fff4; }
+0066 | .card-kicker { display: block; margin-bottom: 23px; color: var(--accent); font-size: 10px; font-weight: 700; letter-spacing: .16em; }
+0067 | .sketch-line { display: block; height: 8px; margin: 11px 0; border-radius: 4px; background: #d6e3dc; }
+0068 | .sketch-line.wide { width: 90%; background: #abcfc0; }
+0069 | .sketch-line.medium { width: 68%; }
+0070 | .sketch-line.short { width: 46%; }
+0071 | .card-stamp { width: 42px; height: 42px; display: grid; place-items: center; position: absolute; right: 20px; bottom: 15px; border: 2px solid #e7b953; border-radius: 50%; color: #d9a838; font: 700 20px "Space Grotesk"; transform: rotate(12deg); }
+0072 | .card-stamp.check { border-color: var(--accent); color: var(--accent); }
+0073 | .connection-line { position: absolute; top: 46%; left: 34%; z-index: 2; display: flex; flex-direction: column; align-items: center; gap: 2px; color: var(--accent); font-size: 10px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; }
+0074 | .connection-line i { font: 30px/1 "DM Sans"; }
+0075 | 
+0076 | .section { padding: 92px 0; }
+0077 | .section-light { background: #fff; }
+0078 | .section-heading { max-width: 540px; margin-bottom: 45px; }
+0079 | .section-heading.centered { margin-right: auto; margin-left: auto; text-align: center; }
+0080 | .section-heading h2, .problem-grid h2 { margin-bottom: 15px; font-size: clamp(29px, 4vw, 42px); line-height: 1.12; }
+0081 | .section-heading p, .problem-grid p { color: var(--muted); }
+0082 | .steps-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
+0083 | .step-card { min-height: 220px; padding: 25px; border: 1px solid var(--line); border-radius: 9px; background: var(--paper); transition: .2s ease; }
+0084 | .step-card:hover { box-shadow: var(--shadow); transform: translateY(-3px); }
+0085 | .step-number { color: var(--accent); font: 600 13px "Space Grotesk"; }
+0086 | .step-card h3 { margin: 34px 0 10px; font-size: 21px; }
+0087 | .step-card p { margin: 0; color: var(--muted); }
+0088 | .problem-section { background: var(--accent); color: #f4fcf8; }
+0089 | .problem-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 80px; align-items: center; }
+0090 | .problem-grid .eyebrow { color: #a6dec6; }
+0091 | .problem-grid p { color: #c7e5d8; }
+0092 | .problem-grid .arrow-link { margin-top: 14px; color: #fff; }
+0093 | 
+0094 | .footer { padding: 43px 0; border-top: 1px solid var(--line); background: #fff; }
+0095 | .footer-inner { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 30px; }
+0096 | .footer-brand { margin-bottom: 9px; }
+0097 | .footer-brand .brand-mark { width: 28px; height: 28px; border-radius: 8px 8px 8px 2px; font-size: 9px; }
+0098 | .footer-brand strong { font-size: 17px; }
+0099 | .footer p { margin: 0; color: var(--muted); font-size: 12px; }
+0100 | .footer-links { display: flex; gap: 20px; font-size: 12px; }
+0101 | .footer-note { text-align: right; }
+0102 | 
+0103 | .flash-stack { position: fixed; top: 89px; left: 50%; z-index: 20; width: min(540px, calc(100% - 32px)); transform: translateX(-50%); }
+0104 | .flash { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 12px 15px; margin-bottom: 9px; border: 1px solid; border-radius: 7px; box-shadow: var(--shadow); background: #fff; font-size: 13px; animation: rise .3s ease; }
+0105 | .flash-success { border-color: #b2dcca; color: var(--accent-dark); }
+0106 | .flash-error { border-color: #efc8c8; color: var(--danger); }
+0107 | .flash-close { border: 0; color: inherit; background: transparent; cursor: pointer; font-size: 20px; line-height: 1; }
+0108 | @keyframes rise { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: translateY(0); } }
+0109 | 
+0110 | .page-header { padding: 68px 0 52px; border-bottom: 1px solid var(--line); background: #fff; }
+0111 | .page-header h1 { margin: 0 0 10px; font-size: clamp(38px, 5vw, 58px); line-height: 1.04; }
+0112 | .page-header p:not(.eyebrow) { max-width: 590px; margin: 0; color: var(--muted); font-size: 16px; }
+0113 | .compact-header { padding: 48px 0 40px; }
+0114 | .page-content { padding-top: 35px; padding-bottom: 90px; }
+0115 | .dashboard-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 30px; }
+0116 | .dashboard-actions .arrow-link { margin-left: auto; }
+0117 | .stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 13px; margin-bottom: 34px; }
+0118 | .stat-card { min-height: 143px; padding: 21px; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
+0119 | .stat-accent { border-color: #a8d8c8; background: var(--accent-soft); }
+0120 | .stat-label, .stat-caption { display: block; color: var(--muted); font-size: 12px; }
+0121 | .stat-card strong { display: block; margin: 12px 0 1px; color: var(--accent-dark); font: 600 35px/1 "Space Grotesk"; }
+0122 | .content-grid { display: grid; grid-template-columns: 1.45fr .7fr; gap: 20px; }
+0123 | .panel, .tip-card, .table-card { border: 1px solid var(--line); border-radius: 9px; background: #fff; }
+0124 | .panel { overflow: hidden; }
+0125 | .panel-heading { display: flex; justify-content: space-between; align-items: flex-start; padding: 23px 24px 17px; border-bottom: 1px solid var(--line); }
+0126 | .panel-heading h2 { margin: 0; font-size: 23px; }
+0127 | .panel-heading a { color: var(--accent); font-size: 12px; font-weight: 700; }
+0128 | .report-row { display: flex; align-items: center; gap: 13px; padding: 15px 24px; border-bottom: 1px solid #edf1ee; transition: background .2s; }
+0129 | .report-row:last-child { border-bottom: 0; }
+0130 | .report-row:hover { background: #f8fbf9; }
+0131 | .report-icon { width: 35px; height: 35px; display: grid; place-items: center; border-radius: 7px; font: 700 12px "Space Grotesk"; }
+0132 | .report-icon.lost, .type-pill.lost { color: #9e5b25; background: #fff0de; }
+0133 | .report-icon.found, .type-pill.found { color: var(--accent-dark); background: var(--accent-soft); }
+0134 | .report-info { flex: 1; }
+0135 | .report-info strong, .report-info small { display: block; }
+0136 | .report-info small { color: var(--muted); font-size: 11px; }
+0137 | .status { display: inline-block; padding: 4px 8px; border-radius: 100px; color: #66716c; background: #eef2ef; font-size: 10px; font-weight: 700; text-transform: capitalize; }
+0138 | .status-possible_match { color: #966c13; background: #fff4cd; }
+0139 | .status-resolved { color: var(--accent-dark); background: var(--accent-soft); }
+0140 | .tip-card { padding: 27px; background: #f0f5f1; }
+0141 | .tip-icon { width: 28px; height: 28px; display: grid; place-items: center; margin-bottom: 28px; border: 1px solid #98bdae; border-radius: 50%; color: var(--accent); font: 700 15px serif; }
+0142 | .tip-card h3 { max-width: 230px; margin-bottom: 11px; font-size: 22px; }
+0143 | .tip-card p:last-child { color: var(--muted); }
+0144 | 
+0145 | .auth-page { min-height: calc(100vh - 78px); padding: 65px 20px; display: grid; place-items: center; background: #eff5f1; }
+0146 | .auth-card { width: min(460px, 100%); padding: 39px; border: 1px solid var(--line); border-radius: 11px; background: #fff; box-shadow: var(--shadow); }
+0147 | .auth-intro { margin-bottom: 28px; }
+0148 | .mini-mark { margin-bottom: 29px; }
+0149 | .auth-intro h1 { margin-bottom: 10px; font-size: 32px; line-height: 1.12; }
+0150 | .auth-intro p:last-child { margin: 0; color: var(--muted); }
+0151 | .form-stack { display: grid; gap: 17px; }
+0152 | label { display: grid; gap: 7px; color: #35413c; font-size: 12px; font-weight: 700; }
+0153 | .optional { color: #89958e; font-weight: 400; }
+0154 | input, select, textarea { width: 100%; border: 1px solid #cfdad3; border-radius: 6px; padding: 11px 12px; outline: none; color: var(--ink); background: #fbfdfb; font-size: 13px; }
+0155 | textarea { resize: vertical; min-height: 90px; }
+0156 | input:focus, select:focus, textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(23,122,103,.1); }
+0157 | .auth-switch { margin: 25px 0 0; text-align: center; color: var(--muted); font-size: 12px; }
+0158 | .auth-switch a { color: var(--accent); font-weight: 700; }
+0159 | 
+0160 | .form-page { padding-top: 36px; padding-bottom: 90px; }
+0161 | .report-form { max-width: 780px; margin: 0 auto; }
+0162 | .form-section { margin-bottom: 35px; padding-bottom: 30px; border-bottom: 1px solid var(--line); }
+0163 | .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+0164 | .full-width { grid-column: 1 / -1; }
+0165 | .upload-box { min-height: 83px; display: flex; align-items: center; gap: 14px; padding: 18px; border: 1px dashed #abc7b9; border-radius: 7px; color: var(--accent-dark); background: #f5fbf7; cursor: pointer; }
+0166 | .upload-box:hover { border-color: var(--accent); background: var(--accent-soft); }
+0167 | .upload-box input { display: none; }
+0168 | .upload-box strong, .upload-box small { display: block; }
+0169 | .upload-box small { color: var(--muted); font-weight: 400; }
+0170 | .upload-icon { width: 31px; height: 31px; display: grid; place-items: center; border-radius: 50%; background: var(--accent-soft); font-size: 20px; }
+0171 | .file-name { margin: 8px 0 0; color: var(--muted); font-size: 11px; }
+0172 | .form-actions { display: flex; justify-content: flex-end; gap: 10px; }
+0173 | 
+0174 | .filter-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 27px; }
+0175 | .filter-bar input, .filter-bar select { width: auto; min-width: 120px; padding: 9px 10px; }
+0176 | .filter-search { display: flex; flex: 1 1 240px; align-items: center; position: relative; }
+0177 | .filter-search span { position: absolute; left: 11px; color: var(--muted); font-size: 22px; transform: rotate(-15deg); }
+0178 | .filter-search input { width: 100%; padding-left: 33px; }
+0179 | .clear-link { color: var(--muted); font-size: 12px; }
+0180 | .browse-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 17px; }
+0181 | .item-card { overflow: hidden; border: 1px solid var(--line); border-radius: 8px; background: #fff; transition: .2s ease; }
+0182 | .item-card:hover { box-shadow: var(--shadow); transform: translateY(-3px); }
+0183 | .item-card img, .item-placeholder { width: 100%; height: 160px; display: block; object-fit: cover; }
+0184 | .item-placeholder { display: grid; place-items: center; background: #eef5f0; }
+0185 | .item-placeholder.lost { background: #fcf0e3; }
+0186 | .item-placeholder span { width: 51px; height: 51px; display: grid; place-items: center; border: 1px solid #afc9ba; border-radius: 50%; color: var(--accent); font: 600 21px "Space Grotesk"; }
+0187 | .item-placeholder.lost span { border-color: #ddb77e; color: #b27632; }
+0188 | .item-card-body { padding: 17px; }
+0189 | .item-card-top, .detail-meta { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+0190 | .category-label { color: var(--accent); font-size: 10px; font-weight: 700; text-transform: uppercase; }
+0191 | .item-card h3 { margin: 10px 0 4px; font-size: 18px; }
+0192 | .item-card p { margin: 0 0 12px; color: var(--muted); font-size: 12px; }
+0193 | .item-card small { color: #87948c; font-size: 10px; }
+0194 | .empty-state { padding: 70px 20px; text-align: center; }
+0195 | .empty-state.large { padding: 95px 20px; border: 1px dashed #c5d5cb; border-radius: 9px; background: rgba(255,255,255,.5); }
+0196 | .empty-state.compact { padding: 42px 20px; }
+0197 | .empty-icon { width: 54px; height: 54px; display: grid; place-items: center; margin: 0 auto 19px; border: 1px solid #afcdbd; border-radius: 50%; color: var(--accent); font: 600 21px "Space Grotesk"; }
+0198 | .empty-state h2, .empty-state h3 { margin-bottom: 7px; }
+0199 | .empty-state p { max-width: 420px; margin: 0 auto 22px; color: var(--muted); }
+0200 | 
+0201 | .matches-list { display: grid; gap: 18px; max-width: 850px; margin: 0 auto; }
+0202 | .match-card { padding: 25px; border: 1px solid var(--line); border-radius: 9px; background: #fff; }
+0203 | .match-summary { display: flex; align-items: flex-start; justify-content: space-between; gap: 15px; }
+0204 | .match-level { display: inline-block; padding: 5px 9px; border-radius: 100px; color: #8d681b; background: #fff1c4; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; }
+0205 | .match-level.high { color: var(--accent-dark); background: var(--accent-soft); }
+0206 | .match-summary h2 { margin: 13px 0 0; color: var(--accent-dark); font-size: 33px; }
+0207 | .match-summary h2 small { color: var(--muted); font: 400 12px "DM Sans"; letter-spacing: 0; }
+0208 | .comparison { display: grid; grid-template-columns: 1fr auto 1fr; gap: 20px; align-items: center; margin: 22px 0; padding: 18px; border-radius: 7px; background: #f6f9f6; }
+0209 | .comparison-label, .comparison-side strong { display: block; }
+0210 | .comparison-label { margin-bottom: 7px; color: var(--muted); font-size: 9px; font-weight: 700; letter-spacing: .15em; }
+0211 | .comparison-side strong { font-size: 16px; }
+0212 | .comparison-side p { margin: 5px 0 0; color: var(--muted); font-size: 12px; }
+0213 | .comparison-mark { color: var(--accent); font-size: 24px; }
+0214 | .reason-list { display: flex; flex-wrap: wrap; gap: 8px; padding-top: 16px; border-top: 1px solid var(--line); }
+0215 | .reason-list strong { flex-basis: 100%; margin-bottom: 3px; font-size: 12px; }
+0216 | .reason-list span { padding: 5px 8px; border-radius: 4px; color: var(--accent-dark); background: #eff8f2; font-size: 11px; }
+0217 | .match-footer { display: flex; flex-wrap: wrap; gap: 19px; margin-top: 20px; }
+0218 | 
+0219 | .table-card { overflow: hidden; }
+0220 | .table-head, .table-row { display: grid; grid-template-columns: 1.5fr .7fr 1fr 1fr 1fr; gap: 16px; align-items: center; padding: 14px 20px; }
+0221 | .table-head { color: var(--muted); background: #f6f9f6; font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+0222 | .table-row { border-top: 1px solid #edf1ee; color: #56625b; font-size: 12px; }
+0223 | .table-row a strong, .table-row a small { display: block; }
+0224 | .table-row a small { color: var(--muted); font-size: 10px; }
+0225 | .type-pill { display: inline-block; width: max-content; padding: 4px 8px; border-radius: 4px; font-size: 10px; font-weight: 700; text-transform: uppercase; }
+0226 | .small-action { border: 0; padding: 0; color: var(--accent); background: none; cursor: pointer; font-size: 11px; font-weight: 700; }
+0227 | .resolved-check { color: var(--accent); font-size: 11px; }
+0228 | 
+0229 | .detail-page { padding-top: 44px; padding-bottom: 90px; }
+0230 | .detail-grid { display: grid; grid-template-columns: .83fr 1.17fr; gap: 65px; align-items: start; }
+0231 | .detail-image { overflow: hidden; border-radius: 9px; background: #eef5f0; box-shadow: var(--shadow); }
+0232 | .detail-image img { display: block; width: 100%; max-height: 450px; object-fit: cover; }
+0233 | .detail-placeholder { min-height: 360px; display: grid; place-items: center; color: var(--accent); font: 600 52px "Space Grotesk"; letter-spacing: .1em; }
+0234 | .detail-placeholder.lost { color: #b27738; background: #fcf0e3; }
+0235 | .detail-copy h1 { margin: 20px 0 2px; font-size: clamp(38px, 5vw, 58px); line-height: 1.03; }
+0236 | .detail-subtitle { margin-bottom: 30px; color: var(--muted); font-size: 16px; }
+0237 | .detail-facts { margin: 0 0 28px; }
+0238 | .detail-facts div { padding: 13px 0; border-top: 1px solid var(--line); }
+0239 | .detail-facts dt { margin-bottom: 3px; color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; }
+0240 | .detail-facts dd { margin: 0; color: #344039; }
+0241 | .reporter-box { display: grid; gap: 4px; margin-bottom: 22px; padding: 17px; border-left: 3px solid var(--accent); background: #f0f6f2; }
+0242 | .reporter-box .eyebrow { margin: 0 0 5px; }
+0243 | .reporter-box strong { font-size: 15px; }
+0244 | .reporter-box span:not(.eyebrow), .reporter-box a { color: var(--muted); font-size: 12px; }
+0245 | .reporter-box a { color: var(--accent); font-weight: 700; }
+0246 | .related-section { margin-top: 80px; padding-top: 35px; border-top: 1px solid var(--line); }
+0247 | .related-section h2 { margin-bottom: 21px; font-size: 28px; }
+0248 | .related-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 13px; }
+0249 | .related-card { display: grid; gap: 8px; padding: 18px; border: 1px solid var(--line); border-radius: 7px; background: #fff; }
+0250 | .related-card:hover { border-color: #a2cdbb; }
+0251 | .related-card strong { font-size: 15px; }
+0252 | .related-card > span:not(.match-level), .related-card small { color: var(--muted); font-size: 11px; }
+0253 | .related-card small { line-height: 1.45; }
+0254 | 
+0255 | .about-header { background: #e8f3ed; }
+0256 | .about-header h1 { max-width: 700px; }
+0257 | .about-content { max-width: 850px; padding-top: 64px; padding-bottom: 90px; }
+0258 | .about-block { display: grid; grid-template-columns: 90px 1fr; gap: 25px; padding: 35px 0; border-bottom: 1px solid var(--line); }
+0259 | .about-number { color: var(--accent); font: 600 20px "Space Grotesk"; }
+0260 | .about-block h2 { margin-bottom: 10px; font-size: 27px; }
+0261 | .about-block p { max-width: 620px; color: var(--muted); }
+0262 | .tech-list { display: flex; flex-wrap: wrap; gap: 8px; margin: 20px 0; }
+0263 | .tech-list span { padding: 7px 11px; border: 1px solid #b8d3c4; border-radius: 5px; color: var(--accent-dark); background: #eff8f2; font-size: 12px; font-weight: 700; }
+0264 | .error-state { min-height: 55vh; display: grid; place-items: center; align-content: center; }
+0265 | 
+0266 | @media (max-width: 820px) {
+0267 |   .nav-links { gap: 12px; }
+0268 |   .hero-grid, .problem-grid, .content-grid, .detail-grid { grid-template-columns: 1fr; }
+0269 |   .hero-grid { gap: 30px; }
+0270 |   .hero-illustration { min-height: 360px; max-width: 500px; width: 100%; margin: auto; }
+0271 |   .problem-grid { gap: 25px; }
+0272 |   .content-grid { gap: 18px; }
+0273 |   .browse-grid { grid-template-columns: repeat(2, 1fr); }
+0274 |   .detail-grid { gap: 35px; }
+0275 |   .detail-image { max-width: 550px; }
+0276 |   .related-grid { grid-template-columns: repeat(2, 1fr); }
+0277 |   .footer-inner { grid-template-columns: 1fr 1fr; }
+0278 |   .footer-note { grid-column: 1 / -1; text-align: left; }
+0279 | }
+0280 | @media (max-width: 630px) {
+0281 |   .container { width: min(100% - 30px, 540px); }
+0282 |   .topbar { height: 68px; padding: 0 15px; }
+0283 |   .menu-toggle { display: block; }
+0284 |   .nav-links { display: none; position: absolute; top: 68px; left: 0; right: 0; padding: 17px 15px 21px; flex-direction: column; align-items: stretch; border-bottom: 1px solid var(--line); background: #fff; box-shadow: var(--shadow); }
+0285 |   .nav-links.open { display: flex; }
+0286 |   .nav-divider { display: none; }
+0287 |   .nav-links .button { text-align: center; }
+0288 |   .hero { padding: 62px 0 55px; }
+0289 |   .hero h1 { font-size: 46px; }
+0290 |   .hero-lede { font-size: 15px; }
+0291 |   .hero-actions, .hero-actions .button { width: 100%; }
+0292 |   .hero-illustration { min-height: 300px; transform: scale(.9); margin: -5px auto -20px; }
+0293 |   .paper-card { width: 250px; }
+0294 |   .paper-lost { left: 0; }
+0295 |   .paper-found { right: 0; }
+0296 |   .section { padding: 62px 0; }
+0297 |   .steps-grid, .stats-grid { grid-template-columns: 1fr 1fr; }
+0298 |   .step-card { min-height: 200px; padding: 17px; }
+0299 |   .step-card h3 { margin-top: 20px; }
+0300 |   .footer-inner { grid-template-columns: 1fr; gap: 20px; }
+0301 |   .footer-note { grid-column: auto; }
+0302 |   .footer-links { flex-wrap: wrap; }
+0303 |   .page-header { padding: 45px 0 35px; }
+0304 |   .dashboard-actions .arrow-link { margin-left: 0; flex-basis: 100%; }
+0305 |   .form-grid { grid-template-columns: 1fr; }
+0306 |   .full-width { grid-column: auto; }
+0307 |   .form-actions { justify-content: stretch; }
+0308 |   .form-actions .button { flex: 1; }
+0309 |   .filter-bar input, .filter-bar select, .filter-search { width: 100%; flex-basis: 100%; }
+0310 |   .filter-bar .button { width: 100%; }
+0311 |   .browse-grid, .related-grid { grid-template-columns: 1fr; }
+0312 |   .comparison { gap: 8px; padding: 13px; }
+0313 |   .comparison-mark { font-size: 19px; }
+0314 |   .match-card { padding: 17px; }
+0315 |   .match-summary { display: block; }
+0316 |   .match-summary .button { margin-top: 16px; }
+0317 |   .table-card { border: 0; background: transparent; }
+0318 |   .table-head { display: none; }
+0319 |   .table-row { grid-template-columns: 1fr 1fr; gap: 10px; padding: 16px 0; border: 1px solid var(--line); border-radius: 7px; margin-bottom: 9px; background: #fff; }
+0320 |   .table-row > * { padding: 0 15px; }
+0321 |   .table-row > *:nth-child(3) { grid-column: 1 / 2; }
+0322 |   .table-row > *:nth-child(4) { grid-column: 2 / 3; }
+0323 |   .table-row > *:last-child { grid-column: 1 / -1; }
+0324 |   .detail-placeholder { min-height: 250px; }
+0325 |   .auth-card { padding: 27px 21px; }
+0326 |   .about-block { grid-template-columns: 50px 1fr; gap: 10px; }
+0327 | }
+
+==============================================================================
+FILE: static/js/script.js
+==============================================================================
+0001 | document.addEventListener("DOMContentLoaded", () => {
+0002 |   const toggle = document.querySelector("[data-menu-toggle]");
+0003 |   const nav = document.querySelector("[data-nav]");
+0004 |   toggle?.addEventListener("click", () => nav?.classList.toggle("open"));
+0005 | 
+0006 |   document.querySelectorAll("[data-dismiss]").forEach((button) => {
+0007 |     button.addEventListener("click", () => button.parentElement?.remove());
+0008 |   });
+0009 | 
+0010 |   const input = document.querySelector("[data-file-input]");
+0011 |   const name = document.querySelector("[data-file-name]");
+0012 |   input?.addEventListener("change", () => {
+0013 |     const file = input.files?.[0];
+0014 |     if (name) name.textContent = file ? file.name : "No image selected";
+0015 |   });
+0016 | 
+0017 |   window.setTimeout(() => {
+0018 |     document.querySelectorAll(".flash").forEach((flash) => flash.remove());
+0019 |   }, 5500);
+0020 | });
